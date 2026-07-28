@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createLogger } from "../lib/logger.js";
+import { tracePersonDiagnosis } from "../lib/tracing.js";
 import { PersonDiagnosisStateSchema, createInitialPersonDiagnosisState, type PersonDiagnosisState } from "../state/person-diagnosis.js";
 import { buildPersonDiagnosisGraph } from "./person-diagnosis.js";
 import {
@@ -22,7 +23,7 @@ export type RunPersonDiagnosisInput = {
   threadId?: string | null;
 };
 
-export async function runPersonDiagnosis(input: RunPersonDiagnosisInput) {
+async function runPersonDiagnosisImpl(input: RunPersonDiagnosisInput) {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
   const threadId = input.threadId ?? runId;
@@ -123,3 +124,5 @@ export async function runPersonDiagnosis(input: RunPersonDiagnosisInput) {
     throw error;
   }
 }
+
+export const runPersonDiagnosis = tracePersonDiagnosis(runPersonDiagnosisImpl);
