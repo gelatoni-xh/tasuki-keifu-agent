@@ -1,0 +1,62 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build deploy image archive
+        run: |
+          docker build -t tasuki-keifu-agent:latest .
+          docker save tasuki-keifu-agent:latest | gzip > tasuki-keifu-agent-image.tar.gz
+
+      - name: Copy deployment files
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.UBUNTU3_HOST }}
+          username: ${{ secrets.UBUNTU3_USER }}
+          key: ${{ secrets.UBUNTU3_SSH_KEY }}
+          source: "tasuki-keifu-agent-image.tar.gz,docker-compose.prod.yml"
+          target: "/tmp/tasuki-keifu-agent-deploy"
+
+      - name: Deploy on Ubuntu-3
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.UBUNTU3_HOST }}
+          username: ${{ secrets.UBUNTU3_USER }}
+          key: ${{ secrets.UBUNTU3_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            mkdir -p /opt/apps/tasuki-keifu-agent
+            cp /tmp/tasuki-keifu-agent-deploy/docker-compose.prod.yml /opt/apps/tasuki-keifu-agent/docker-compose.prod.yml
+            test -f /opt/apps/tasuki-keifu-agent/.env.production
+            sudo docker load -i /tmp/tasuki-keifu-agent-deploy/tasuki-keifu-agent-image.tar.gz
+            cd /opt/apps/tasuki-keifu-agent
+            sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+            sudo docker image prune -f
+            sleep 5
+            curl -fsS http://127.0.0.1:3040/health >/dev/null
