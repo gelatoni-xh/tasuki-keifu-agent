@@ -1,0 +1,9 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    network_mode: host
+    restart: unless-stopped

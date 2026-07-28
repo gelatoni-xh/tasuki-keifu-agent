@@ -7,6 +7,7 @@
   "scripts": {
     "diagnose": "tsx src/cli/index.ts diagnose",
     "inspect": "tsx src/cli/inspect.ts",
+    "start": "tsx src/server.ts",
     "smoke:diagnosis": "tsx src/cli/smoke.ts",
     "smoke:tools": "tsx src/cli/tool-smoke.ts",
     "smoke:nodes": "tsx src/cli/node-smoke.ts",
