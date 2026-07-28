@@ -1,0 +1,35 @@
+{
+  "name": "tasuki-keifu-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "diagnose": "tsx src/cli/index.ts diagnose",
+    "inspect": "tsx src/cli/inspect.ts",
+    "smoke:diagnosis": "tsx src/cli/smoke.ts",
+    "smoke:tools": "tsx src/cli/tool-smoke.ts",
+    "smoke:nodes": "tsx src/cli/node-smoke.ts",
+    "smoke:persistence": "tsx src/cli/persistence-smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@langchain/langgraph": "^1.0.2",
+    "@langchain/core": "^1.1.48",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "dotenv": "^17.2.1",
+    "pg": "^8.22.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.9",
+    "@types/pg": "^8.20.0",
+    "prisma": "^7.8.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.8.3"
+  }
+}

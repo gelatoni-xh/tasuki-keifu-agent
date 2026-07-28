@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AgentRunStatus {
+  running
+  need_clarification
+  completed
+  failed
+}
+
+enum AgentEventLevel {
+  debug
+  info
+  warn
+  error
+}
+
+model AgentRun {
+  id           String         @id
+  graphName    String
+  status       AgentRunStatus @default(running)
+  input        Json
+  output       Json?
+  currentNode  String?
+  threadId     String?
+  startedAt    DateTime       @default(now())
+  endedAt      DateTime?
+  errorMessage String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  checkpoints  AgentCheckpoint[]
+  events       AgentEvent[]
+  diagnosis    DiagnosisResult?
+
+  @@index([graphName, startedAt])
+  @@index([status, startedAt])
+}
+
+model AgentCheckpoint {
+  id        String   @id @default(cuid())
+  runId     String
+  nodeName  String
+  state     Json
+  createdAt DateTime @default(now())
+
+  run       AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@index([nodeName, createdAt])
+}
+
+model AgentEvent {
+  id        String          @id @default(cuid())
+  runId     String
+  nodeName  String?
+  level     AgentEventLevel @default(info)
+  message   String
+  payload   Json?
+  createdAt DateTime        @default(now())
+
+  run       AgentRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@index([level, createdAt])
+}
+
+model DiagnosisResult {
+  id          String   @id @default(cuid())
+  runId       String   @unique
+  personId    String?
+  personSlug  String?
+  status      String
+  summary     String?
+  findings    Json
+  actions     Json
+  snapshot    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  run         AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([personSlug])
+  @@index([personId])
+  @@index([status, createdAt])
+}
