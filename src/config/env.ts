@@ -1,5 +1,9 @@
 import "dotenv/config";
 
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { z } from "zod";
 
 const EnvSchema = z.object({
@@ -15,6 +19,11 @@ const EnvSchema = z.object({
   LANGCHAIN_ENDPOINT: z.string().optional(),
   TASUKI_AGENT_LOG_LEVEL: z.string().optional(),
 });
+
+const localLangSmithKeyPath = path.join(os.homedir(), ".codex", "secrets", "langsmith_api_key");
+if (!process.env.LANGSMITH_API_KEY?.trim() && existsSync(localLangSmithKeyPath)) {
+  process.env.LANGSMITH_API_KEY = readFileSync(localLangSmithKeyPath, "utf8").trim();
+}
 
 export const env = EnvSchema.parse(process.env);
 
