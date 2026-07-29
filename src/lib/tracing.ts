@@ -5,6 +5,7 @@ import { env } from "../config/env.js";
 
 const apiKey = env.LANGSMITH_API_KEY?.trim() || env.LANGCHAIN_API_KEY?.trim() || "";
 const apiUrl = env.LANGSMITH_ENDPOINT?.trim() || env.LANGCHAIN_ENDPOINT?.trim() || undefined;
+const workspaceId = env.LANGSMITH_WORKSPACE_ID?.trim() || undefined;
 const projectName = env.LANGSMITH_PROJECT?.trim() || env.LANGCHAIN_PROJECT?.trim() || "tasuki-keifu-agent-v1";
 const tracingEnabled = Boolean(apiKey);
 
@@ -12,6 +13,7 @@ const client = tracingEnabled
   ? new Client({
       apiKey,
       apiUrl,
+      workspaceId,
     })
   : undefined;
 
@@ -24,4 +26,3 @@ export function tracePersonDiagnosis<T extends (...args: any[]) => Promise<any>>
     project_name: projectName,
   }) as T;
 }
-
