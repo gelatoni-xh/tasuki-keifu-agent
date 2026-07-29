@@ -61,7 +61,7 @@ jobs:
             test -f /opt/apps/tasuki-keifu-agent/.env.production
             sudo docker load -i /tmp/tasuki-keifu-agent-deploy/tasuki-keifu-agent-image.tar.gz
             cd /opt/apps/tasuki-keifu-agent
-            sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+            sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d
             sudo docker image prune -f
             sleep 5
             curl -fsS http://127.0.0.1:3040/health >/dev/null
