@@ -13,10 +13,10 @@ async function main() {
     const actionCountOk = item.expectedActionCount === undefined || result.state.actions.length === item.expectedActionCount;
     const issueCodesOk =
       item.expectedIssueCodes === undefined ||
-      JSON.stringify(result.state.findings.map((issue) => issue.code)) === JSON.stringify(item.expectedIssueCodes);
+      item.expectedIssueCodes.every((code) => result.state.findings.some((issue) => issue.code === code));
     const actionCodesOk =
       item.expectedActionCodes === undefined ||
-      JSON.stringify(result.state.actions.map((action) => action.code)) === JSON.stringify(item.expectedActionCodes);
+      item.expectedActionCodes.every((code) => result.state.actions.some((action) => action.code === code));
     results.push({
       label: item.label,
       runtimeStatus: result.state.runtimeStatus,

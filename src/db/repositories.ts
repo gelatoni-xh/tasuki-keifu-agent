@@ -157,15 +157,32 @@ export async function finalizeGovernanceBatch(input: {
 }
 
 export async function findLatestFinalizedGovernance(personId: string) {
-  return agentPrisma.governanceSubject.findFirst({
+  const subjects = await agentPrisma.governanceSubject.findMany({
     where: {
       personId,
       status: { in: ["completed", "held"] },
       completedAt: { not: null },
     },
     orderBy: { completedAt: "desc" },
-    select: { completedAt: true },
+    select: {
+      completedAt: true,
+      findings: true,
+    },
   });
+
+  return subjects.find((subject) => {
+    const findings = Array.isArray(subject.findings) ? subject.findings : [];
+    const findingCodes = findings
+      .map((finding) =>
+        finding && typeof finding === "object" && typeof (finding as { code?: unknown }).code === "string"
+          ? (finding as { code: string }).code
+          : "",
+      )
+      .filter(Boolean);
+
+    // Profile completeness is an observation, not a completed governance result.
+    return !(findingCodes.length > 0 && findingCodes.every((code) => code === "profile_coverage_missing_fields"));
+  }) ?? null;
 }
 
 export async function createGovernanceSubject(input: {

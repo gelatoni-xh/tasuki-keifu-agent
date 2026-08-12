@@ -35,6 +35,13 @@ export const ActionBundleItemSchema = z.object({
 
 export const NameIdentityResearchVerdictSchema = z.enum(["not_run", "same", "different", "uncertain"]);
 
+export const ProfileWikipediaResearchSchema = z.object({
+  status: z.enum(["not_needed", "found", "not_found", "unavailable"]),
+  summary: z.string(),
+  sourceUrl: z.string().nullable(),
+  suggestedFields: z.record(z.string(), z.string()).default({}),
+});
+
 export const ActionBundleSchema = z.object({
   personId: z.string().nullable(),
   personSlug: z.string().nullable(),
@@ -122,6 +129,7 @@ export type ActionBundleItem = z.infer<typeof ActionBundleItemSchema>;
 export type ActionBundle = z.infer<typeof ActionBundleSchema>;
 export type ActionRiskAssessment = z.infer<typeof ActionRiskAssessmentSchema>;
 export type NameIdentityResearchVerdict = z.infer<typeof NameIdentityResearchVerdictSchema>;
+export type ProfileWikipediaResearch = z.infer<typeof ProfileWikipediaResearchSchema>;
 export type PersonCandidate = z.infer<typeof PersonCandidateSchema>;
 export type PersonProfile = z.infer<typeof PersonProfileSchema>;
 export type MembershipSnapshot = z.infer<typeof MembershipSnapshotSchema>;

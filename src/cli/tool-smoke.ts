@@ -51,6 +51,9 @@ async function main() {
     profileCoverage.ok && profileCoverage.data ? profileCoverage.data.findings.map((item) => item.code) : [],
     ["profile_coverage_missing_fields"],
   );
+  if (profileCoverage.ok && profileCoverage.data?.findings[0]?.severity !== "low") {
+    throw new Error("auditProfileCoverageTool should treat missing profile fields as low severity");
+  }
   report.push({ tool: "auditProfileCoverageTool", ok: true });
 
   const membershipTimeline = await auditMembershipTimelineTool({

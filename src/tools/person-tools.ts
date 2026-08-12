@@ -107,9 +107,9 @@ export async function auditProfileCoverageTool(input: {
       findings.push({
         code: "profile_coverage_missing_fields",
         title: "profile coverage gaps",
-        severity: missing.length >= 3 ? "high" : "medium",
+        severity: "low",
         node: "check_profile_coverage",
-        summary: `Profile is missing ${missing.length} expected fields.`,
+        summary: `Profile is missing ${missing.length} optional fields.`,
         evidence: {
           personId: input.personId,
           personSlug: input.personSlug,

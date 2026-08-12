@@ -1,5 +1,5 @@
 import { env } from "../config/env.js";
-import { traceNameIdentityResearch } from "./tracing.js";
+import { traceNameIdentityResearch, traceProfileWikipediaResearch } from "./tracing.js";
 
 type JsonValue = Record<string, unknown>;
 
@@ -19,6 +19,18 @@ export type NameIdentityResearchResult = {
   summary: string;
   reason: string;
   sourceMode: "web_search" | "llm_only" | "unavailable";
+};
+
+export type ProfileWikipediaResearchInput = {
+  targetName: string;
+  missingFields: string[];
+};
+
+export type ProfileWikipediaResearchResult = {
+  status: "found" | "not_found" | "unavailable";
+  summary: string;
+  sourceUrl: string | null;
+  suggestedFields: Record<string, string>;
 };
 
 function getTimeoutMs() {
@@ -152,3 +164,94 @@ async function researchNameIdentityImpl(input: NameIdentityResearchInput): Promi
 }
 
 export const researchNameIdentity = traceNameIdentityResearch(researchNameIdentityImpl);
+
+function parseProfileWikipediaResearch(value: JsonValue): ProfileWikipediaResearchResult {
+  const status = value.status;
+  const suggestedFields =
+    value.suggestedFields && typeof value.suggestedFields === "object" && !Array.isArray(value.suggestedFields)
+      ? Object.fromEntries(
+          Object.entries(value.suggestedFields).filter(
+            ([key, fieldValue]) =>
+              ["birthDate", "hometown", "nationality", "displayNameKana"].includes(key)
+              && typeof fieldValue === "string"
+              && fieldValue.trim().length > 0,
+          ),
+        )
+      : {};
+  const sourceUrl = typeof value.sourceUrl === "string" ? value.sourceUrl : null;
+  const isWikipediaSource = sourceUrl
+    ? (() => {
+        try {
+          return new URL(sourceUrl).hostname.endsWith(".wikipedia.org");
+        } catch {
+          return false;
+        }
+      })()
+    : false;
+
+  return {
+    status: status === "found" && isWikipediaSource && Object.keys(suggestedFields).length > 0 ? "found" : "not_found",
+    summary: typeof value.summary === "string" ? value.summary : "Wikipedia 未返回可用资料。",
+    sourceUrl: isWikipediaSource ? sourceUrl : null,
+    suggestedFields: isWikipediaSource ? suggestedFields : {},
+  };
+}
+
+async function researchProfileWikipediaImpl(
+  input: ProfileWikipediaResearchInput,
+): Promise<ProfileWikipediaResearchResult> {
+  const config = getConfig();
+  if (!config) {
+    return {
+      status: "unavailable",
+      summary: "未配置本地 LLM 认证，无法查询 Wikipedia。",
+      sourceUrl: null,
+      suggestedFields: {},
+    };
+  }
+
+  const instructions = [
+    "你负责从 Wikipedia 补查日本长跑选手的基础 profile。",
+    "只允许使用 Wikipedia 页面作为证据，不得使用其他网站。",
+    "仅返回请求字段中能被 Wikipedia 明确支持的值；无法确认时不要猜测。",
+    "birthDate 使用 YYYY-MM-DD；hometown、nationality、displayNameKana 使用 Wikipedia 的明确文本。",
+    "只输出 JSON，不要 Markdown。字段必须是 status、summary、sourceUrl、suggestedFields。",
+    'status 只能是 "found" 或 "not_found"。',
+  ].join("\n");
+
+  try {
+    const response = await postJson(
+      "/responses",
+      {
+        model: config.model,
+        instructions,
+        input: JSON.stringify(input, null, 2),
+        tools: [{ type: "web_search_preview" }],
+        max_output_tokens: 400,
+      },
+      config,
+    );
+    const outputText =
+      (typeof response.output_text === "string" && response.output_text) ||
+      (Array.isArray(response.output)
+        ? response.output
+            .flatMap((item) => (item && typeof item === "object" && Array.isArray((item as { content?: unknown[] }).content)
+              ? (item as { content: unknown[] }).content
+              : []))
+            .map((item) => item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+              ? (item as { text: string }).text
+              : "")
+            .join("")
+        : "");
+    return parseProfileWikipediaResearch(parseJsonObject(outputText));
+  } catch (error) {
+    return {
+      status: "unavailable",
+      summary: `Wikipedia 查询未完成：${error instanceof Error ? error.message : String(error)}`,
+      sourceUrl: null,
+      suggestedFields: {},
+    };
+  }
+}
+
+export const researchProfileWikipedia = traceProfileWikipediaResearch(researchProfileWikipediaImpl);

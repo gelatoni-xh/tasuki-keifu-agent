@@ -10,6 +10,7 @@ import {
   PersonCandidateSchema,
   PersonProfileSchema,
   PersonalBestSnapshotSchema,
+  ProfileWikipediaResearchSchema,
   RelationCacheSnapshotSchema,
   SuggestedActionSchema,
 } from "../types/diagnosis.js";
@@ -29,6 +30,7 @@ export const PersonDiagnosisStateSchema = z.object({
   normalizationCandidates: z.array(PersonCandidateSchema).default([]),
   normalizationRiskStatus: NormalizationRiskStatusSchema.default("not_checked"),
   nameIdentityResearchVerdict: NameIdentityResearchVerdictSchema.default("not_run"),
+  profileWikipediaResearch: ProfileWikipediaResearchSchema.nullable().default(null),
   clarificationAttempts: z.number().int().min(0).default(0),
 
   profile: PersonProfileSchema.nullable().default(null),
@@ -85,6 +87,7 @@ export function createInitialPersonDiagnosisState(input: {
     normalizationCandidates: [],
     normalizationRiskStatus: "not_checked",
     nameIdentityResearchVerdict: "not_run",
+    profileWikipediaResearch: null,
     clarificationAttempts: 0,
     findings: [],
     actions: [],

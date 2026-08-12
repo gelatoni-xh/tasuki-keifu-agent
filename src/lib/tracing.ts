@@ -36,3 +36,13 @@ export function traceNameIdentityResearch<T extends (...args: any[]) => Promise<
     project_name: projectName,
   }) as T;
 }
+
+export function traceProfileWikipediaResearch<T extends (...args: any[]) => Promise<any>>(handler: T): T {
+  return traceable(handler, {
+    name: "research_profile_wikipedia_llm",
+    run_type: "llm",
+    client,
+    tracingEnabled,
+    project_name: projectName,
+  }) as T;
+}

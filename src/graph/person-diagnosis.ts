@@ -1,7 +1,7 @@
 import { END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 
 import { createLogger } from "../lib/logger.js";
-import { researchNameIdentity } from "../lib/codex-llm.js";
+import { researchNameIdentity, researchProfileWikipedia } from "../lib/codex-llm.js";
 import { normalizeSearchKey } from "../lib/normalize.js";
 import {
   auditMembershipTimelineTool,
@@ -20,6 +20,7 @@ type PersonDiagnosisNode =
   | "clarification"
   | "load_person_snapshot"
   | "check_profile_coverage"
+  | "research_profile_wikipedia"
   | "check_membership_timeline"
   | "check_person_normalization_risk"
   | "research_name_identity"
@@ -193,6 +194,57 @@ async function profileCoverageNode(state: PersonDiagnosisState) {
   } satisfies Partial<PersonDiagnosisState>;
 }
 
+async function researchProfileWikipediaNode(state: PersonDiagnosisState) {
+  const profileFinding = state.findings.find((finding) => finding.code === "profile_coverage_missing_fields");
+  const missingFields = Array.isArray(profileFinding?.evidence.missing)
+    ? profileFinding.evidence.missing.filter((field): field is string => typeof field === "string")
+    : [];
+
+  if (missingFields.length === 0) {
+    return {
+      profileWikipediaResearch: {
+        status: "not_needed",
+        summary: "Profile 没有需要补查的字段。",
+        sourceUrl: null,
+        suggestedFields: {},
+      },
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  const research = await researchProfileWikipedia({
+    targetName: state.targetDisplayNameJa ?? "",
+    missingFields,
+  });
+
+  if (research.status === "found") {
+    return {
+      profileWikipediaResearch: research,
+      findings: [
+        ...state.findings,
+        {
+          code: "profile_wikipedia_data_available",
+          title: "Wikipedia profile data available",
+          severity: "low",
+          node: "research_profile_wikipedia",
+          summary: research.summary,
+          evidence: {
+            personId: state.targetPersonId,
+            personSlug: state.targetPersonSlug,
+            sourceUrl: research.sourceUrl,
+            suggestedFields: research.suggestedFields,
+          },
+        },
+      ],
+      resultNotes: [...state.resultNotes, `Wikipedia profile 查询：${research.summary}`],
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  return {
+    profileWikipediaResearch: research,
+    resultNotes: [...state.resultNotes, `Wikipedia profile 查询未补到字段：${research.summary}`],
+  } satisfies Partial<PersonDiagnosisState>;
+}
+
 async function membershipTimelineNode(state: PersonDiagnosisState) {
   const result = await auditMembershipTimelineTool({
     personId: state.targetPersonId ?? "",
@@ -339,12 +391,12 @@ function summarizeFindings(state: PersonDiagnosisState) {
 
 function buildActionPlanNode(state: PersonDiagnosisState) {
   const actionsByCode: Record<string, SuggestedAction> = {
-    profile_coverage_missing_fields: {
-      code: "backfill_profile_fields",
-      title: "Backfill missing profile fields",
+    profile_wikipedia_data_available: {
+      code: "backfill_profile_from_wikipedia",
+      title: "Backfill profile fields from Wikipedia",
       priority: "medium",
-      rationale: "Profile coverage gaps should be reviewed and completed from trusted sources.",
-      relatedIssueCodes: ["profile_coverage_missing_fields"],
+      rationale: "Wikipedia supplied explicit values for one or more currently missing profile fields.",
+      relatedIssueCodes: ["profile_wikipedia_data_available"],
     },
     multiple_current_memberships: {
       code: "review_membership_timeline",
@@ -563,6 +615,7 @@ export function buildPersonDiagnosisGraph() {
   graph.addNode("clarification", instrumentNode("clarification", clarificationNode, logger));
   graph.addNode("load_person_snapshot", instrumentNode("load_person_snapshot", loadSnapshotNode, logger));
   graph.addNode("check_profile_coverage", instrumentNode("check_profile_coverage", profileCoverageNode, logger));
+  graph.addNode("research_profile_wikipedia", instrumentNode("research_profile_wikipedia", researchProfileWikipediaNode, logger));
   graph.addNode("check_membership_timeline", instrumentNode("check_membership_timeline", membershipTimelineNode, logger));
   graph.addNode("check_person_normalization_risk", instrumentNode("check_person_normalization_risk", normalizationRiskNode, logger));
   graph.addNode("research_name_identity", instrumentNode("research_name_identity", researchNameIdentityNode, logger));
@@ -607,7 +660,8 @@ export function buildPersonDiagnosisGraph() {
     return END;
   }, ["resolve_person", END]);
   graph.addEdge("load_person_snapshot", "check_profile_coverage");
-  graph.addEdge("check_profile_coverage", "check_membership_timeline");
+  graph.addEdge("check_profile_coverage", "research_profile_wikipedia");
+  graph.addEdge("research_profile_wikipedia", "check_membership_timeline");
   graph.addEdge("check_membership_timeline", "check_person_normalization_risk");
   graph.addConditionalEdges(
     "check_person_normalization_risk",
