@@ -1,8 +1,9 @@
 import { END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 
 import { createLogger } from "../lib/logger.js";
-import { researchNameIdentity, researchProfileWikipedia } from "../lib/codex-llm.js";
+import { researchNameIdentity } from "../lib/codex-llm.js";
 import { normalizeSearchKey } from "../lib/normalize.js";
+import { researchProfileWikipedia } from "../lib/wikipedia.js";
 import {
   auditMembershipTimelineTool,
   auditPersonNormalizationRiskTool,

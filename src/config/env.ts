@@ -23,6 +23,7 @@ const EnvSchema = z.object({
   OPENAI_BASE_URL: z.string().optional(),
   OPENAI_MODEL: z.string().optional(),
   TASUKI_LLM_TIMEOUT_MS: z.string().optional(),
+  TASUKI_WIKIPEDIA_TIMEOUT_MS: z.string().optional(),
   TASUKI_AGENT_WRITE_ENABLED: z.string().optional(),
   TASUKI_AGENT_LOG_LEVEL: z.string().optional(),
 });

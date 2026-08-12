@@ -11,6 +11,7 @@ V1 scope:
 - governance batch runner with per-person action-bundle audit records
 - LangSmith tracing through standard `LANGCHAIN_*` environment variables
 - optional GPT-5.4 name identity research for ambiguous normalization candidates
+- direct Wikipedia MediaWiki API profile checks that follow standard HTTP proxy settings or the local macOS system proxy
 
 ## Local Setup
 
@@ -30,6 +31,7 @@ Set:
 - `LANGSMITH_TRACING=true`
 - `LANGSMITH_PROJECT=tasuki-keifu-agent-v1`
 - optional `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`; when omitted, local Codex settings are used
+- optional `HTTPS_PROXY` or `HTTP_PROXY` for Wikipedia API access; on macOS, the agent falls back to the system proxy configuration
 
 ## Run
 

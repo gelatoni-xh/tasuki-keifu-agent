@@ -5,6 +5,7 @@ import {
   auditProfileCoverageTool,
   resolvePersonTool,
 } from "../tools/person-tools.js";
+import { researchProfileWikipedia } from "../lib/wikipedia.js";
 
 function assertArrayEqual(label: string, actual: string[], expected: string[]) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -55,6 +56,19 @@ async function main() {
     throw new Error("auditProfileCoverageTool should treat missing profile fields as low severity");
   }
   report.push({ tool: "auditProfileCoverageTool", ok: true });
+
+  const wikipediaProfile = await researchProfileWikipedia({
+    targetName: "佐藤碧",
+    missingFields: ["birthDate", "hometown", "nationality", "displayNameKana"],
+  });
+  if (
+    wikipediaProfile.status !== "found"
+    || !wikipediaProfile.suggestedFields.birthDate
+    || !wikipediaProfile.suggestedFields.hometown
+  ) {
+    throw new Error(`researchProfileWikipedia expected a matching page, received: ${JSON.stringify(wikipediaProfile)}`);
+  }
+  report.push({ tool: "researchProfileWikipedia", ok: true });
 
   const membershipTimeline = await auditMembershipTimelineTool({
     personId: await resolveUniquePersonId("person-m-and-a-best-partners-06debb74"),
