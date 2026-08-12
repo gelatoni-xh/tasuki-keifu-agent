@@ -98,6 +98,7 @@ async function runPersonDiagnosisImpl(input: RunPersonDiagnosisInput) {
         summary: result.resultSummary,
         issueCount: result.findings.length,
         actionCount: result.actions.length,
+        actionRiskLevel: result.actionRiskAssessment?.level ?? null,
       },
     });
 

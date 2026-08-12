@@ -26,3 +26,13 @@ export function tracePersonDiagnosis<T extends (...args: any[]) => Promise<any>>
     project_name: projectName,
   }) as T;
 }
+
+export function traceNameIdentityResearch<T extends (...args: any[]) => Promise<any>>(handler: T): T {
+  return traceable(handler, {
+    name: "research_name_identity_llm",
+    run_type: "llm",
+    client,
+    tracingEnabled,
+    project_name: projectName,
+  }) as T;
+}

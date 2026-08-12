@@ -17,9 +17,9 @@ async function main() {
     "check_membership_timeline",
     "check_person_normalization_risk",
     "check_personal_best_consistency",
-    "check_relation_cache_status",
     "summarize_findings",
     "build_action_plan",
+    "evaluate_action_bundle_risk",
   ]);
   report.push({ label: "single-person", ok: true });
 
@@ -40,15 +40,33 @@ async function main() {
     "check_membership_timeline",
     "check_person_normalization_risk",
     "check_personal_best_consistency",
-    "check_relation_cache_status",
     "summarize_findings",
     "build_action_plan",
+    "evaluate_action_bundle_risk",
   ]);
   report.push({ label: "clarified-duplicate-name", ok: true });
 
   const notFound = await runPersonDiagnosis({ personSlug: "person-this-slug-should-not-exist-20260728" });
   assertArrayEqual("not-found nodeHistory", notFound.state.runtimeNodeHistory, ["resolve_person"]);
   report.push({ label: "not-found", ok: true });
+
+  const ambiguousNormalization = await runPersonDiagnosis({
+    personSlug: "person-kantoic2026-39aa43d4854dfb296157",
+  });
+  if (!ambiguousNormalization.state.runtimeNodeHistory.includes("research_name_identity")) {
+    throw new Error("ambiguous-normalization did not enter research_name_identity");
+  }
+  const researchFinding = ambiguousNormalization.state.findings.find(
+    (item) => item.node === "research_name_identity",
+  );
+  if (researchFinding && !["duplicate_normalized_name", "name_identity_uncertain"].includes(researchFinding.code)) {
+    throw new Error(`unexpected research finding code: ${researchFinding.code}`);
+  }
+  report.push({
+    label: "ambiguous-normalization",
+    researchFindingCode: researchFinding?.code ?? null,
+    ok: true,
+  });
 
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }

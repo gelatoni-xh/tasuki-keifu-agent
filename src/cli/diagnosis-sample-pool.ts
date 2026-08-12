@@ -91,16 +91,6 @@ export const diagnosisSamplePool: DiagnosisSampleCase[] = [
     expectedActionCodes: ["backfill_profile_fields", "review_name_normalization"],
   },
   {
-    label: "relation-cache-stale",
-    input: { personSlug: "person-kao-f94f0d89" },
-    expectedRuntimeStatus: "completed",
-    expectedResolutionStatus: "unique",
-    expectedIssueCount: 2,
-    expectedActionCount: 2,
-    expectedIssueCodes: ["profile_coverage_missing_fields", "relation_cache_stale"],
-    expectedActionCodes: ["backfill_profile_fields", "refresh_relation_cache"],
-  },
-  {
     label: "timeline-overlap",
     input: { personSlug: "person-kantoic2025-b091569c126a650147e5" },
     expectedRuntimeStatus: "completed",

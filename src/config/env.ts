@@ -8,6 +8,7 @@ import { z } from "zod";
 
 const EnvSchema = z.object({
   TASUKI_KEIFU_BUSINESS_DATABASE_URL: z.string().min(1),
+  TASUKI_KEIFU_BUSINESS_WRITE_DATABASE_URL: z.string().optional(),
   TASUKI_KEIFU_AGENT_DATABASE_URL: z.string().min(1),
   LANGSMITH_TRACING: z.string().optional(),
   LANGSMITH_API_KEY: z.string().optional(),
@@ -18,12 +19,42 @@ const EnvSchema = z.object({
   LANGCHAIN_API_KEY: z.string().optional(),
   LANGCHAIN_PROJECT: z.string().optional(),
   LANGCHAIN_ENDPOINT: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_BASE_URL: z.string().optional(),
+  OPENAI_MODEL: z.string().optional(),
+  TASUKI_LLM_TIMEOUT_MS: z.string().optional(),
+  TASUKI_AGENT_WRITE_ENABLED: z.string().optional(),
   TASUKI_AGENT_LOG_LEVEL: z.string().optional(),
 });
 
 const localLangSmithKeyPath = path.join(os.homedir(), ".codex", "secrets", "langsmith_api_key");
 if (!process.env.LANGSMITH_API_KEY?.trim() && existsSync(localLangSmithKeyPath)) {
   process.env.LANGSMITH_API_KEY = readFileSync(localLangSmithKeyPath, "utf8").trim();
+}
+
+const localCodexAuthPath = path.join(os.homedir(), ".codex", "auth.json");
+if (!process.env.OPENAI_API_KEY?.trim() && existsSync(localCodexAuthPath)) {
+  try {
+    const localCodexAuth = JSON.parse(readFileSync(localCodexAuthPath, "utf8")) as { OPENAI_API_KEY?: string };
+    if (localCodexAuth.OPENAI_API_KEY?.trim()) {
+      process.env.OPENAI_API_KEY = localCodexAuth.OPENAI_API_KEY.trim();
+    }
+  } catch {
+    // A malformed local Codex auth file should not prevent rule-only checks.
+  }
+}
+
+const localCodexConfigPath = path.join(os.homedir(), ".codex", "config.toml");
+if (existsSync(localCodexConfigPath)) {
+  const localCodexConfig = readFileSync(localCodexConfigPath, "utf8");
+  const baseUrl = localCodexConfig.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1];
+  const model = localCodexConfig.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1];
+  if (!process.env.OPENAI_BASE_URL?.trim() && baseUrl) {
+    process.env.OPENAI_BASE_URL = baseUrl;
+  }
+  if (!process.env.OPENAI_MODEL?.trim() && model) {
+    process.env.OPENAI_MODEL = model;
+  }
 }
 
 export const env = EnvSchema.parse(process.env);

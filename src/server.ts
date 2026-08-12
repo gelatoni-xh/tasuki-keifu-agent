@@ -47,6 +47,8 @@ const server = createServer(async (request, response) => {
         targetPersonSlug: result.state.targetPersonSlug,
         findings: result.state.findings,
         actions: result.state.actions,
+        actionBundle: result.state.actionBundle,
+        actionRiskAssessment: result.state.actionRiskAssessment,
         resultSummary: result.state.resultSummary,
       });
       return;

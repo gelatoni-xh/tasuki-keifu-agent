@@ -20,10 +20,39 @@ export const SuggestedActionSchema = z.object({
   relatedIssueCodes: z.array(z.string()).default([]),
 });
 
+export const ActionRiskLevelSchema = z.enum(["low", "medium", "high"]);
+export const ActionExecutionStatusSchema = z.enum(["planned", "held", "skipped", "succeeded", "failed"]);
+
+export const ActionBundleItemSchema = z.object({
+  code: z.string(),
+  title: z.string(),
+  order: z.number().int().min(1),
+  rationale: z.string(),
+  relatedIssueCodes: z.array(z.string()).default([]),
+  payload: z.record(z.string(), z.unknown()).default({}),
+  idempotencyKey: z.string(),
+});
+
+export const NameIdentityResearchVerdictSchema = z.enum(["not_run", "same", "different", "uncertain"]);
+
+export const ActionBundleSchema = z.object({
+  personId: z.string().nullable(),
+  personSlug: z.string().nullable(),
+  items: z.array(ActionBundleItemSchema).default([]),
+});
+
+export const ActionRiskAssessmentSchema = z.object({
+  level: ActionRiskLevelSchema.nullable().default(null),
+  reasons: z.array(z.string()).default([]),
+  executionStatus: ActionExecutionStatusSchema.nullable().default(null),
+});
+
 export const PersonCandidateSchema = z.object({
   personId: z.string(),
   personSlug: z.string(),
   displayNameJa: z.string(),
+  displayNameKana: z.string().nullable().optional(),
+  displayNameRoman: z.string().nullable().optional(),
 });
 
 export const PersonProfileSchema = z.object({
@@ -89,8 +118,15 @@ export const RelationCacheSnapshotSchema = z.object({
 
 export type DiagnosisIssue = z.infer<typeof DiagnosisIssueSchema>;
 export type SuggestedAction = z.infer<typeof SuggestedActionSchema>;
+export type ActionBundleItem = z.infer<typeof ActionBundleItemSchema>;
+export type ActionBundle = z.infer<typeof ActionBundleSchema>;
+export type ActionRiskAssessment = z.infer<typeof ActionRiskAssessmentSchema>;
+export type NameIdentityResearchVerdict = z.infer<typeof NameIdentityResearchVerdictSchema>;
 export type PersonCandidate = z.infer<typeof PersonCandidateSchema>;
 export type PersonProfile = z.infer<typeof PersonProfileSchema>;
 export type MembershipSnapshot = z.infer<typeof MembershipSnapshotSchema>;
 export type PersonalBestSnapshot = z.infer<typeof PersonalBestSnapshotSchema>;
 export type RelationCacheSnapshot = z.infer<typeof RelationCacheSnapshotSchema>;
+
+export const NormalizationRiskStatusSchema = z.enum(["not_checked", "no_risk", "definite", "ambiguous", "overflow"]);
+export type NormalizationRiskStatus = z.infer<typeof NormalizationRiskStatusSchema>;

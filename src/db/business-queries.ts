@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 
 import { getBusinessPool } from "./business.js";
-import { normalizeSearchKey } from "../lib/normalize.js";
+import { buildLowercaseJaVariants, buildLowercaseKanaVariants, normalizeSearchKey } from "../lib/normalize.js";
 import { toDateString, toIsoString } from "../lib/time.js";
 import type {
   MembershipSnapshot,
@@ -34,6 +34,57 @@ type QueryClient = Pick<Pool, "query">;
 
 function getQueryClient(client?: QueryClient) {
   return client ?? getBusinessPool();
+}
+
+export type GovernanceCandidate = {
+  personId: string;
+  personSlug: string;
+  displayNameJa: string;
+  businessUpdatedAt: string;
+};
+
+export async function listGovernanceCandidates(input: {
+  limit: number;
+  client?: QueryClient;
+}): Promise<GovernanceCandidate[]> {
+  const client = getQueryClient(input.client);
+  const { rows } = await client.query<{
+    personId: string;
+    personSlug: string;
+    displayNameJa: string;
+    businessUpdatedAt: Date;
+  }>(
+    `
+      SELECT
+        p."id" AS "personId",
+        p."slug" AS "personSlug",
+        p."displayNameJa",
+        GREATEST(
+          p."updatedAt",
+          COALESCE((
+            SELECT MAX(m."updatedAt")
+            FROM "Membership" m
+            WHERE m."personId" = p."id"
+          ), p."updatedAt"),
+          COALESCE((
+            SELECT MAX(pb."updatedAt")
+            FROM "PersonalBest" pb
+            WHERE pb."personId" = p."id"
+          ), p."updatedAt")
+        ) AS "businessUpdatedAt"
+      FROM "Person" p
+      ORDER BY "businessUpdatedAt" ASC, p."id" ASC
+      LIMIT $1
+    `,
+    [input.limit],
+  );
+
+  return rows.map((row) => ({
+    personId: row.personId,
+    personSlug: row.personSlug,
+    displayNameJa: row.displayNameJa,
+    businessUpdatedAt: row.businessUpdatedAt.toISOString(),
+  }));
 }
 
 export async function resolvePersonCandidates(input: {
@@ -354,37 +405,65 @@ export async function findNameNormalizationCandidates(input: {
   personId: string;
   personSlug: string;
   displayNameJa: string;
+  displayNameKana?: string | null;
   client?: QueryClient;
 }): Promise<PersonCandidate[]> {
   const client = getQueryClient(input.client);
   const normalized = normalizeSearchKey(input.displayNameJa);
+  const jaVariants = buildLowercaseJaVariants(input.displayNameJa);
+  const kanaVariants = input.displayNameKana ? buildLowercaseKanaVariants(input.displayNameKana) : [];
+  const clauses = [`p."displayNameJaSearch" = $1`];
+  const params: Array<string | string[]> = [normalized, input.personId];
+
+  if (jaVariants.length > 0) {
+    params.push(jaVariants);
+    clauses.push(
+      `regexp_replace(LOWER(p."displayNameJa"), '\\s+', '', 'g') = ANY($${params.length}::text[])`,
+    );
+  }
+
+  if (kanaVariants.length > 0) {
+    params.push(kanaVariants);
+    clauses.push(
+      `regexp_replace(LOWER(COALESCE(p."displayNameKana", '')), '\\s+', '', 'g') = ANY($${params.length}::text[])`,
+    );
+  }
+
   const { rows } = await client.query<{
     id: string;
     slug: string;
     displayNameJa: string;
+    displayNameKana: string | null;
+    displayNameRoman: string | null;
   }>(
     `
       SELECT
         p."id",
         p."slug",
-        p."displayNameJa"
+        p."displayNameJa",
+        p."displayNameKana",
+        p."displayNameRoman"
       FROM "Person" p
-      WHERE p."displayNameJaSearch" = $1
+      WHERE (${clauses.join(" OR ")})
         AND p."id" <> $2
       ORDER BY p."updatedAt" DESC, p."displayNameJa" ASC
       LIMIT 10
     `,
-    [normalized, input.personId],
+    params,
   );
 
   return (rows as Array<{
     id: string;
     slug: string;
     displayNameJa: string;
+    displayNameKana: string | null;
+    displayNameRoman: string | null;
   }>).map((row) => ({
     personId: row.id,
     personSlug: row.slug,
     displayNameJa: row.displayNameJa,
+    displayNameKana: row.displayNameKana,
+    displayNameRoman: row.displayNameRoman,
   }));
 }
 

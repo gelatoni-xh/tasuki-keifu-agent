@@ -124,3 +124,125 @@ export async function finalizeAgentRun(input: {
     endedAt: new Date(),
   });
 }
+
+export async function createGovernanceBatch(input: {
+  batchId: string;
+  dryRun: boolean;
+  payload: unknown;
+}) {
+  return agentPrisma.governanceBatch.create({
+    data: {
+      id: input.batchId,
+      dryRun: input.dryRun,
+      input: input.payload as never,
+    },
+  });
+}
+
+export async function finalizeGovernanceBatch(input: {
+  batchId: string;
+  status: "completed" | "failed";
+  summary?: unknown;
+  errorMessage?: string | null;
+}) {
+  await agentPrisma.governanceBatch.update({
+    where: { id: input.batchId },
+    data: {
+      status: input.status,
+      summary: input.summary as never,
+      errorMessage: input.errorMessage ?? null,
+      endedAt: new Date(),
+    },
+  });
+}
+
+export async function findLatestFinalizedGovernance(personId: string) {
+  return agentPrisma.governanceSubject.findFirst({
+    where: {
+      personId,
+      status: { in: ["completed", "held"] },
+      completedAt: { not: null },
+    },
+    orderBy: { completedAt: "desc" },
+    select: { completedAt: true },
+  });
+}
+
+export async function createGovernanceSubject(input: {
+  batchId: string;
+  personId: string;
+  personSlug: string;
+  businessUpdatedAt: Date;
+}) {
+  return agentPrisma.governanceSubject.create({
+    data: {
+      batchId: input.batchId,
+      personId: input.personId,
+      personSlug: input.personSlug,
+      businessUpdatedAt: input.businessUpdatedAt,
+    },
+  });
+}
+
+export async function finalizeGovernanceSubject(input: {
+  subjectId: string;
+  diagnosisRunId?: string | null;
+  status: "completed" | "held" | "failed";
+  riskLevel?: "low" | "medium" | "high" | null;
+  findings?: unknown;
+  actionBundle?: unknown;
+  holdReason?: string | null;
+  errorMessage?: string | null;
+}) {
+  await agentPrisma.governanceSubject.update({
+    where: { id: input.subjectId },
+    data: {
+      diagnosisRunId: input.diagnosisRunId ?? null,
+      status: input.status,
+      riskLevel: input.riskLevel ?? null,
+      findings: input.findings as never,
+      actionBundle: input.actionBundle as never,
+      holdReason: input.holdReason ?? null,
+      errorMessage: input.errorMessage ?? null,
+      completedAt: new Date(),
+    },
+  });
+}
+
+export async function createActionExecution(input: {
+  subjectId: string;
+  actionCode: string;
+  idempotencyKey: string;
+  action: unknown;
+  status: "planned" | "held" | "skipped" | "succeeded" | "failed";
+  result?: unknown;
+  errorMessage?: string | null;
+}) {
+  return agentPrisma.actionExecution.upsert({
+    where: {
+      subjectId_actionCode: {
+        subjectId: input.subjectId,
+        actionCode: input.actionCode,
+      },
+    },
+    create: {
+      subjectId: input.subjectId,
+      actionCode: input.actionCode,
+      idempotencyKey: input.idempotencyKey,
+      status: input.status,
+      action: input.action as never,
+      result: input.result as never,
+      errorMessage: input.errorMessage ?? null,
+      startedAt: input.status === "planned" || input.status === "held" ? null : new Date(),
+      endedAt: input.status === "planned" ? null : new Date(),
+    },
+    update: {
+      idempotencyKey: input.idempotencyKey,
+      status: input.status,
+      action: input.action as never,
+      result: input.result as never,
+      errorMessage: input.errorMessage ?? null,
+      endedAt: input.status === "planned" ? null : new Date(),
+    },
+  });
+}

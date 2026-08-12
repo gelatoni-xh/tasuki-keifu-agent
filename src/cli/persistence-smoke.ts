@@ -25,7 +25,7 @@ async function main() {
     throw new Error(`unexpected run status: ${run.status}`);
   }
 
-  if (run.currentNode !== "build_action_plan") {
+  if (run.currentNode !== "evaluate_action_bundle_risk") {
     throw new Error(`unexpected current node: ${run.currentNode}`);
   }
 

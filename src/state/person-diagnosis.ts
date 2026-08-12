@@ -1,8 +1,12 @@
 import { z } from "zod";
 
 import {
+  ActionBundleSchema,
+  ActionRiskAssessmentSchema,
   DiagnosisIssueSchema,
   MembershipSnapshotSchema,
+  NameIdentityResearchVerdictSchema,
+  NormalizationRiskStatusSchema,
   PersonCandidateSchema,
   PersonProfileSchema,
   PersonalBestSnapshotSchema,
@@ -22,6 +26,9 @@ export const PersonDiagnosisStateSchema = z.object({
   targetDisplayNameJa: z.string().nullable().default(null),
   resolutionStatus: z.enum(["unresolved", "unique", "multiple", "not_found"]).default("unresolved"),
   candidatePeople: z.array(PersonCandidateSchema).default([]),
+  normalizationCandidates: z.array(PersonCandidateSchema).default([]),
+  normalizationRiskStatus: NormalizationRiskStatusSchema.default("not_checked"),
+  nameIdentityResearchVerdict: NameIdentityResearchVerdictSchema.default("not_run"),
   clarificationAttempts: z.number().int().min(0).default(0),
 
   profile: PersonProfileSchema.nullable().default(null),
@@ -31,6 +38,8 @@ export const PersonDiagnosisStateSchema = z.object({
 
   findings: z.array(DiagnosisIssueSchema).default([]),
   actions: z.array(SuggestedActionSchema).default([]),
+  actionBundle: ActionBundleSchema.nullable().default(null),
+  actionRiskAssessment: ActionRiskAssessmentSchema.nullable().default(null),
 
   runtimeRunId: z.string(),
   runtimeStatus: z.enum(["running", "need_clarification", "completed", "failed"]).default("running"),
@@ -73,9 +82,14 @@ export function createInitialPersonDiagnosisState(input: {
     runtimeThreadId: input.threadId ?? null,
     runtimeNodeHistory: [],
     candidatePeople: [],
+    normalizationCandidates: [],
+    normalizationRiskStatus: "not_checked",
+    nameIdentityResearchVerdict: "not_run",
     clarificationAttempts: 0,
     findings: [],
     actions: [],
+    actionBundle: null,
+    actionRiskAssessment: null,
     resultStatus: null,
     resultSummary: null,
     resultNotes: [],

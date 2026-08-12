@@ -20,6 +20,33 @@ enum AgentEventLevel {
   error
 }
 
+enum GovernanceBatchStatus {
+  running
+  completed
+  failed
+}
+
+enum GovernanceSubjectStatus {
+  pending
+  completed
+  held
+  failed
+}
+
+enum ActionRiskLevel {
+  low
+  medium
+  high
+}
+
+enum ActionExecutionStatus {
+  planned
+  held
+  skipped
+  succeeded
+  failed
+}
+
 model AgentRun {
   id           String         @id
   graphName    String
@@ -37,9 +64,75 @@ model AgentRun {
   checkpoints  AgentCheckpoint[]
   events       AgentEvent[]
   diagnosis    DiagnosisResult?
+  governanceSubject GovernanceSubject?
 
   @@index([graphName, startedAt])
   @@index([status, startedAt])
+}
+
+model GovernanceBatch {
+  id        String                @id
+  status    GovernanceBatchStatus @default(running)
+  dryRun    Boolean               @default(true)
+  input     Json
+  summary   Json?
+  startedAt DateTime              @default(now())
+  endedAt   DateTime?
+  errorMessage String?
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  subjects  GovernanceSubject[]
+
+  @@index([status, startedAt])
+}
+
+model GovernanceSubject {
+  id                String                  @id @default(cuid())
+  batchId           String
+  personId          String
+  personSlug        String
+  businessUpdatedAt DateTime
+  diagnosisRunId    String?                 @unique
+  status            GovernanceSubjectStatus @default(pending)
+  riskLevel         ActionRiskLevel?
+  findings          Json?
+  actionBundle      Json?
+  holdReason        String?
+  completedAt       DateTime?
+  errorMessage      String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  batch             GovernanceBatch         @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  diagnosisRun      AgentRun?                @relation(fields: [diagnosisRunId], references: [id], onDelete: SetNull)
+  actionExecutions  ActionExecution[]
+
+  @@unique([batchId, personId])
+  @@index([personId, completedAt])
+  @@index([status, completedAt])
+}
+
+model ActionExecution {
+  id             String                @id @default(cuid())
+  subjectId      String
+  actionCode     String
+  idempotencyKey String
+  status         ActionExecutionStatus @default(planned)
+  action         Json
+  result         Json?
+  errorMessage   String?
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  subject        GovernanceSubject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([subjectId, actionCode])
+  @@index([subjectId, createdAt])
+  @@index([idempotencyKey, status])
+  @@index([status, createdAt])
 }
 
 model AgentCheckpoint {

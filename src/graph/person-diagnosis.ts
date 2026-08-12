@@ -1,17 +1,18 @@
 import { END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 
 import { createLogger } from "../lib/logger.js";
+import { researchNameIdentity } from "../lib/codex-llm.js";
+import { normalizeSearchKey } from "../lib/normalize.js";
 import {
   auditMembershipTimelineTool,
   auditPersonNormalizationRiskTool,
   auditPersonalBestConsistencyTool,
   auditProfileCoverageTool,
-  checkRelationCacheTool,
   loadPersonSnapshotTool,
   resolvePersonTool,
 } from "../tools/person-tools.js";
 import { recordAgentEvent, recordCheckpoint } from "../db/repositories.js";
-import type { SuggestedAction } from "../types/diagnosis.js";
+import type { ActionBundleItem, SuggestedAction } from "../types/diagnosis.js";
 import { PersonDiagnosisStateSchema, type PersonDiagnosisState } from "../state/person-diagnosis.js";
 
 type PersonDiagnosisNode =
@@ -21,10 +22,11 @@ type PersonDiagnosisNode =
   | "check_profile_coverage"
   | "check_membership_timeline"
   | "check_person_normalization_risk"
+  | "research_name_identity"
   | "check_personal_best_consistency"
-  | "check_relation_cache_status"
   | "summarize_findings"
-  | "build_action_plan";
+  | "build_action_plan"
+  | "evaluate_action_bundle_risk";
 
 function appendNode(state: PersonDiagnosisState, nodeName: PersonDiagnosisNode) {
   return {
@@ -211,22 +213,97 @@ async function normalizationRiskNode(state: PersonDiagnosisState) {
 
   return {
     findings: [...state.findings, ...(result.ok && result.data ? result.data.findings : [])],
+    normalizationCandidates: result.ok && result.data ? result.data.candidates : [],
+    normalizationRiskStatus: result.ok && result.data ? result.data.riskStatus : "not_checked",
+  } satisfies Partial<PersonDiagnosisState>;
+}
+
+async function researchNameIdentityNode(state: PersonDiagnosisState) {
+  const shouldResearch =
+    (state.normalizationRiskStatus === "ambiguous" || state.normalizationRiskStatus === "definite")
+    && state.normalizationCandidates.length === 1;
+
+  if (!shouldResearch) {
+    return {
+      normalizationRiskStatus: state.normalizationRiskStatus === "not_checked" ? "no_risk" : state.normalizationRiskStatus,
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  const research = await researchNameIdentity({
+    targetName: state.targetDisplayNameJa ?? "",
+    candidates: state.normalizationCandidates,
+  });
+
+  if (research.verdict === "same") {
+    const hasRuleFinding = state.findings.some(
+      (finding) => finding.code === "duplicate_normalized_name" && finding.node === "check_person_normalization_risk",
+    );
+    return {
+      findings: [
+        ...state.findings,
+        ...(hasRuleFinding
+          ? []
+          : [{
+              code: "duplicate_normalized_name",
+              title: "duplicate normalized name",
+              severity: "high" as const,
+              node: "research_name_identity",
+              summary: research.summary,
+              evidence: {
+                targetPersonId: state.targetPersonId,
+                targetPersonSlug: state.targetPersonSlug,
+                targetDisplayNameJa: state.targetDisplayNameJa,
+                candidates: state.normalizationCandidates,
+                reason: research.reason,
+                sourceMode: research.sourceMode,
+              },
+            }]),
+      ],
+      normalizationRiskStatus: "definite",
+      nameIdentityResearchVerdict: "same",
+      resultNotes: [...state.resultNotes, `姓名身份研究（same）：${research.summary}`],
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  if (research.verdict === "uncertain") {
+    return {
+      findings: [
+        ...state.findings.filter(
+          (finding) => !(finding.code === "duplicate_normalized_name" && finding.node === "check_person_normalization_risk"),
+        ),
+        {
+          code: "name_identity_uncertain",
+          title: "name identity uncertain",
+          severity: "medium",
+          node: "research_name_identity",
+          summary: research.summary,
+          evidence: {
+            targetPersonId: state.targetPersonId,
+            targetPersonSlug: state.targetPersonSlug,
+            targetDisplayNameJa: state.targetDisplayNameJa,
+            candidates: state.normalizationCandidates,
+            reason: research.reason,
+            sourceMode: research.sourceMode,
+          },
+        },
+      ],
+      nameIdentityResearchVerdict: "uncertain",
+      resultNotes: [...state.resultNotes, `姓名身份研究：${research.summary}`],
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  return {
+    findings: state.findings.filter(
+      (finding) => !(finding.code === "duplicate_normalized_name" && finding.node === "check_person_normalization_risk"),
+    ),
+    normalizationRiskStatus: "no_risk",
+    nameIdentityResearchVerdict: "different",
+    resultNotes: [...state.resultNotes, `姓名身份研究（different）：${research.summary}`],
   } satisfies Partial<PersonDiagnosisState>;
 }
 
 async function personalBestConsistencyNode(state: PersonDiagnosisState) {
   const result = await auditPersonalBestConsistencyTool({
-    personId: state.targetPersonId ?? "",
-    personSlug: state.targetPersonSlug ?? "",
-  });
-
-  return {
-    findings: [...state.findings, ...(result.ok && result.data ? result.data.findings : [])],
-  } satisfies Partial<PersonDiagnosisState>;
-}
-
-async function relationCacheNode(state: PersonDiagnosisState) {
-  const result = await checkRelationCacheTool({
     personId: state.targetPersonId ?? "",
     personSlug: state.targetPersonSlug ?? "",
   });
@@ -297,20 +374,6 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       rationale: "Conflicting PB rows should be reconciled manually.",
       relatedIssueCodes: ["conflicting_personal_best"],
     },
-    relation_cache_missing: {
-      code: "rebuild_relation_cache",
-      title: "Rebuild relation cache",
-      priority: "low",
-      rationale: "Derived relation cache is missing and should be regenerated by the normal maintenance path.",
-      relatedIssueCodes: ["relation_cache_missing"],
-    },
-    relation_cache_stale: {
-      code: "refresh_relation_cache",
-      title: "Refresh relation cache",
-      priority: "low",
-      rationale: "Derived relation cache is stale relative to the underlying person data.",
-      relatedIssueCodes: ["relation_cache_stale"],
-    },
   };
 
   const actions: SuggestedAction[] = [];
@@ -326,17 +389,167 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
     actions.push(action);
   }
 
+  const nameMergeCandidate = state.nameIdentityResearchVerdict === "same" && state.normalizationCandidates.length === 1
+    ? state.normalizationCandidates[0]
+    : null;
+  const isExactNormalizedNameMatch = nameMergeCandidate
+    ? normalizeSearchKey(nameMergeCandidate.displayNameJa) === normalizeSearchKey(state.targetDisplayNameJa ?? "")
+    : false;
+  const targetIsTemporary = state.targetPersonSlug?.startsWith("person-") ?? false;
+  const candidateIsTemporary = nameMergeCandidate?.personSlug.startsWith("person-") ?? false;
+  const canChooseCanonical = Boolean(nameMergeCandidate) && targetIsTemporary !== candidateIsTemporary;
+
+  if (nameMergeCandidate && isExactNormalizedNameMatch && canChooseCanonical) {
+    const canonical = targetIsTemporary
+      ? nameMergeCandidate
+      : {
+          personId: state.targetPersonId ?? "",
+          personSlug: state.targetPersonSlug ?? "",
+          displayNameJa: state.targetDisplayNameJa ?? "",
+        };
+    const duplicate = targetIsTemporary
+      ? {
+          personId: state.targetPersonId ?? "",
+          personSlug: state.targetPersonSlug ?? "",
+          displayNameJa: state.targetDisplayNameJa ?? "",
+        }
+      : nameMergeCandidate;
+
+    const reviewActionIndex = actions.findIndex((action) => action.code === "review_name_normalization");
+    if (reviewActionIndex >= 0) {
+      actions.splice(reviewActionIndex, 1);
+    }
+
+    actions.push({
+      code: "merge_person_duplicate",
+      title: "Merge confirmed duplicate person",
+      priority: "medium",
+      rationale: "LLM research confirmed the two records refer to the same person, and the non-temporary slug is selected as canonical.",
+      relatedIssueCodes: ["duplicate_normalized_name"],
+    });
+  }
+
   const summary =
     actions.length === 0
       ? "No manual follow-up is required from the current checks."
       : `${actions.length} suggested manual actions prepared.`;
 
+  const actionBundleItems: ActionBundleItem[] = actions.map((action, index) => {
+    const mergePayload = action.code === "merge_person_duplicate" && nameMergeCandidate && isExactNormalizedNameMatch && canChooseCanonical
+      ? {
+          canonicalPersonId: targetIsTemporary ? nameMergeCandidate.personId : state.targetPersonId,
+          canonicalPersonSlug: targetIsTemporary ? nameMergeCandidate.personSlug : state.targetPersonSlug,
+          duplicatePersonId: targetIsTemporary ? state.targetPersonId : nameMergeCandidate.personId,
+          duplicatePersonSlug: targetIsTemporary ? state.targetPersonSlug : nameMergeCandidate.personSlug,
+          researchSummary: state.findings.find((finding) => finding.node === "research_name_identity")?.summary ?? null,
+        }
+      : null;
+    const mergeKey = mergePayload
+      ? [mergePayload.canonicalPersonId, mergePayload.duplicatePersonId].join(":")
+      : state.targetPersonId ?? "unresolved";
+
+    return {
+      code: action.code,
+      title: action.title,
+      order: index + 1,
+      rationale: action.rationale,
+      relatedIssueCodes: action.relatedIssueCodes,
+      payload: mergePayload ?? {
+        personId: state.targetPersonId,
+        personSlug: state.targetPersonSlug,
+        findings: state.findings.filter((finding) => action.relatedIssueCodes.includes(finding.code)),
+      },
+      idempotencyKey: [
+        "person",
+        mergeKey,
+        action.code,
+        [...action.relatedIssueCodes].sort().join(",") || "no_issue",
+      ].join(":"),
+    };
+  });
+
   return {
     actions,
+    actionBundle: {
+      personId: state.targetPersonId,
+      personSlug: state.targetPersonSlug,
+      items: actionBundleItems,
+    },
+    runtimeStatus: "running",
+    resultStatus: null,
+    resultSummary: state.resultSummary ?? summary,
+  } satisfies Partial<PersonDiagnosisState>;
+}
+
+function evaluateActionBundleRiskNode(state: PersonDiagnosisState) {
+  const bundle = state.actionBundle;
+  const items = bundle?.items ?? [];
+  const reasons: string[] = [];
+
+  if (state.findings.some((finding) => finding.code === "name_identity_uncertain")) {
+    reasons.push("姓名身份研究结果不确定，不能执行归一化写动作。");
+  }
+
+  if (state.normalizationRiskStatus === "overflow") {
+    reasons.push("归一化候选数量异常，优先排查召回规则或导入问题。");
+  }
+
+  if (items.some((item) => item.code === "review_name_normalization")) {
+    reasons.push("当前归一化 finding 尚未给出明确的保留记录和删除记录，不能自动合并。");
+  }
+
+  if (items.some((item) => item.code === "review_membership_timeline" || item.code === "review_personal_bests")) {
+    reasons.push("membership 和 PB 修复规则尚未进入第一批自动写入范围。");
+  }
+
+  if (reasons.length > 0) {
+    return {
+      actionRiskAssessment: {
+        level: "high",
+        reasons,
+        executionStatus: "held",
+      },
+      runtimeStatus: "completed",
+      runtimeEndedAt: new Date().toISOString(),
+      resultStatus: "completed",
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  if (items.length === 0) {
+    return {
+      actionRiskAssessment: {
+        level: "low",
+        reasons: ["当前没有需要执行的写动作。"],
+        executionStatus: "skipped",
+      },
+      runtimeStatus: "completed",
+      runtimeEndedAt: new Date().toISOString(),
+      resultStatus: "completed",
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  if (items.every((item) => item.code === "merge_person_duplicate")) {
+    return {
+      actionRiskAssessment: {
+        level: "medium",
+        reasons: ["姓名身份已由 LLM 研究确认，且 action bundle 已明确保留与合并记录。"],
+        executionStatus: "planned",
+      },
+      runtimeStatus: "completed",
+      runtimeEndedAt: new Date().toISOString(),
+      resultStatus: "completed",
+    } satisfies Partial<PersonDiagnosisState>;
+  }
+
+  return {
+    actionRiskAssessment: {
+      level: "medium",
+      reasons: ["动作已结构化，但当前执行器尚未接入此动作类型。"],
+      executionStatus: "held",
+    },
     runtimeStatus: "completed",
     runtimeEndedAt: new Date().toISOString(),
     resultStatus: "completed",
-    resultSummary: state.resultSummary ?? summary,
   } satisfies Partial<PersonDiagnosisState>;
 }
 
@@ -352,10 +565,11 @@ export function buildPersonDiagnosisGraph() {
   graph.addNode("check_profile_coverage", instrumentNode("check_profile_coverage", profileCoverageNode, logger));
   graph.addNode("check_membership_timeline", instrumentNode("check_membership_timeline", membershipTimelineNode, logger));
   graph.addNode("check_person_normalization_risk", instrumentNode("check_person_normalization_risk", normalizationRiskNode, logger));
+  graph.addNode("research_name_identity", instrumentNode("research_name_identity", researchNameIdentityNode, logger));
   graph.addNode("check_personal_best_consistency", instrumentNode("check_personal_best_consistency", personalBestConsistencyNode, logger));
-  graph.addNode("check_relation_cache_status", instrumentNode("check_relation_cache_status", relationCacheNode, logger));
   graph.addNode("summarize_findings", instrumentNode("summarize_findings", async (state) => summarizeFindings(state), logger));
   graph.addNode("build_action_plan", instrumentNode("build_action_plan", async (state) => buildActionPlanNode(state), logger));
+  graph.addNode("evaluate_action_bundle_risk", instrumentNode("evaluate_action_bundle_risk", async (state) => evaluateActionBundleRiskNode(state), logger));
 
   graph.addEdge(START, "resolve_person");
   graph.addConditionalEdges(
@@ -395,11 +609,20 @@ export function buildPersonDiagnosisGraph() {
   graph.addEdge("load_person_snapshot", "check_profile_coverage");
   graph.addEdge("check_profile_coverage", "check_membership_timeline");
   graph.addEdge("check_membership_timeline", "check_person_normalization_risk");
-  graph.addEdge("check_person_normalization_risk", "check_personal_best_consistency");
-  graph.addEdge("check_personal_best_consistency", "check_relation_cache_status");
-  graph.addEdge("check_relation_cache_status", "summarize_findings");
+  graph.addConditionalEdges(
+    "check_person_normalization_risk",
+    (state) =>
+      (state.normalizationRiskStatus === "ambiguous" || state.normalizationRiskStatus === "definite")
+      && state.normalizationCandidates.length === 1
+        ? "research_name_identity"
+        : "check_personal_best_consistency",
+    ["research_name_identity", "check_personal_best_consistency"],
+  );
+  graph.addEdge("research_name_identity", "check_personal_best_consistency");
+  graph.addEdge("check_personal_best_consistency", "summarize_findings");
   graph.addEdge("summarize_findings", "build_action_plan");
-  graph.addEdge("build_action_plan", END);
+  graph.addEdge("build_action_plan", "evaluate_action_bundle_risk");
+  graph.addEdge("evaluate_action_bundle_risk", END);
 
   return graph.compile({
     checkpointer: new MemorySaver(),

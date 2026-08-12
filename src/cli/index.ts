@@ -92,6 +92,8 @@ async function main() {
     targetDisplayNameJa: result.state.targetDisplayNameJa,
     findings: result.state.findings,
     actions: result.state.actions,
+    actionBundle: result.state.actionBundle,
+    actionRiskAssessment: result.state.actionRiskAssessment,
     resultSummary: result.state.resultSummary,
     resultNotes: result.state.resultNotes,
   })}\n`);

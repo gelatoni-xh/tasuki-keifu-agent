@@ -3,7 +3,6 @@ import {
   auditPersonNormalizationRiskTool,
   auditPersonalBestConsistencyTool,
   auditProfileCoverageTool,
-  checkRelationCacheTool,
   resolvePersonTool,
 } from "../tools/person-tools.js";
 
@@ -77,6 +76,21 @@ async function main() {
   );
   report.push({ tool: "auditPersonNormalizationRiskTool", ok: true });
 
+  const ambiguousNormalization = await auditPersonNormalizationRiskTool({
+    personId: await resolveUniquePersonId("person-kantoic2026-39aa43d4854dfb296157"),
+    personSlug: "person-kantoic2026-39aa43d4854dfb296157",
+    displayNameJa: "木村涼太",
+    displayNameKana: "キムラ リョウタ",
+  });
+  if (
+    !ambiguousNormalization.ok ||
+    ambiguousNormalization.data?.riskStatus !== "ambiguous" ||
+    (ambiguousNormalization.data.candidates?.length ?? 0) === 0
+  ) {
+    throw new Error("auditPersonNormalizationRiskTool ambiguous case failed");
+  }
+  report.push({ tool: "auditPersonNormalizationRiskTool", label: "ambiguous", ok: true });
+
   const personalBestConsistency = await auditPersonalBestConsistencyTool({
     personId: await resolveUniquePersonId("nakano-shota"),
     personSlug: "nakano-shota",
@@ -91,17 +105,6 @@ async function main() {
     ],
   );
   report.push({ tool: "auditPersonalBestConsistencyTool", ok: true });
-
-  const relationCache = await checkRelationCacheTool({
-    personId: await resolveUniquePersonId("person-kao-f94f0d89"),
-    personSlug: "person-kao-f94f0d89",
-  });
-  assertArrayEqual(
-    "checkRelationCacheTool",
-    relationCache.ok && relationCache.data ? relationCache.data.findings.map((item) => item.code) : [],
-    ["relation_cache_stale"],
-  );
-  report.push({ tool: "checkRelationCacheTool", ok: true });
 
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }

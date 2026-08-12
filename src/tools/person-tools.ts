@@ -1,10 +1,11 @@
 import type { DiagnosisIssue, PersonCandidate } from "../types/diagnosis.js";
 import {
-  countDuplicateNormalizedNames,
   findNameNormalizationCandidates,
   loadPersonSnapshot,
   resolvePersonCandidates,
 } from "../db/business-queries.js";
+import { normalizeJaMediumKey, normalizeKanaMediumKey, normalizeSearchKey } from "../lib/normalize.js";
+import type { NormalizationRiskStatus } from "../types/diagnosis.js";
 
 export type ToolResult<T> = {
   ok: boolean;
@@ -13,6 +14,11 @@ export type ToolResult<T> = {
     code: string;
     message: string;
   };
+};
+
+type NormalizationCandidate = PersonCandidate & {
+  reasons: string[];
+  matchClass: "definite" | "ambiguous";
 };
 
 export async function resolvePersonTool(input: {
@@ -74,68 +80,6 @@ export async function loadPersonSnapshotTool(input: { personId: string }) {
       ok: false,
       error: {
         code: "load_person_snapshot_failed",
-        message: error instanceof Error ? error.message : String(error),
-      },
-    } satisfies ToolResult<never>;
-  }
-}
-
-export async function checkRelationCacheTool(input: { personId: string; personSlug: string }) {
-  try {
-    const snapshot = await loadPersonSnapshot({ personId: input.personId });
-    const latestSnapshotUpdate = [
-      snapshot.profile.updatedAt,
-      ...snapshot.memberships.map((item: (typeof snapshot.memberships)[number]) => item.updatedAt),
-      ...snapshot.personalBests.map((item: (typeof snapshot.personalBests)[number]) => item.updatedAt),
-    ].reduce<string | null>((latest, current) => {
-      if (!latest) {
-        return current;
-      }
-
-      return current > latest ? current : latest;
-    }, null) ?? snapshot.profile.updatedAt;
-
-    const cacheGeneratedAt = snapshot.relationCache.generatedAt;
-    const findings: DiagnosisIssue[] = [];
-
-    if (!snapshot.relationCache.relationCacheId) {
-      findings.push({
-        code: "relation_cache_missing",
-        title: "relation cache missing",
-        severity: "medium",
-        node: "check_relation_cache_status",
-        summary: "No derived relation cache row exists for this person.",
-        evidence: {
-          personId: input.personId,
-          personSlug: input.personSlug,
-        },
-      });
-    } else if (cacheGeneratedAt && latestSnapshotUpdate && cacheGeneratedAt < latestSnapshotUpdate) {
-      findings.push({
-        code: "relation_cache_stale",
-        title: "relation cache stale",
-        severity: "low",
-        node: "check_relation_cache_status",
-        summary: "Relation cache is older than related profile data.",
-        evidence: {
-          personId: input.personId,
-          cacheGeneratedAt,
-          latestSnapshotUpdate,
-        },
-      });
-    }
-
-    return {
-      ok: true,
-      data: {
-        findings,
-      },
-    } satisfies ToolResult<{ findings: DiagnosisIssue[] }>;
-  } catch (error) {
-    return {
-      ok: false,
-      error: {
-        code: "check_relation_cache_failed",
         message: error instanceof Error ? error.message : String(error),
       },
     } satisfies ToolResult<never>;
@@ -297,22 +241,77 @@ export async function auditPersonNormalizationRiskTool(input: {
   personId: string;
   personSlug: string;
   displayNameJa?: string;
+  displayNameKana?: string | null;
 }) {
   try {
     const snapshot = await loadPersonSnapshot({ personId: input.personId });
     const displayNameJa = input.displayNameJa ?? snapshot.profile.displayNameJa;
+    const displayNameKana = input.displayNameKana ?? snapshot.profile.displayNameKana;
     const findings: DiagnosisIssue[] = [];
-    const duplicateCount = await countDuplicateNormalizedNames({
+    const candidates = await findNameNormalizationCandidates({
+      personId: input.personId,
+      personSlug: input.personSlug,
       displayNameJa,
+      displayNameKana,
     });
 
-    if (duplicateCount > 1) {
-      const candidates = await findNameNormalizationCandidates({
-        personId: input.personId,
-        personSlug: input.personSlug,
-        displayNameJa,
-      });
+    const assessedCandidates: NormalizationCandidate[] = [];
 
+    for (const candidate of candidates) {
+      const jaExactMatch = candidate.displayNameJa.toLowerCase() === displayNameJa.toLowerCase();
+      const jaNormalizedMatch = normalizeSearchKey(candidate.displayNameJa) === normalizeSearchKey(displayNameJa);
+      const jaMediumMatch = normalizeJaMediumKey(candidate.displayNameJa) === normalizeJaMediumKey(displayNameJa);
+      const kanaMediumMatch = typeof displayNameKana === "string"
+        && typeof candidate.displayNameKana === "string"
+        && normalizeKanaMediumKey(candidate.displayNameKana) === normalizeKanaMediumKey(displayNameKana);
+
+      const reasons = [
+        jaExactMatch ? "display_name_ja_exact" : null,
+        !jaExactMatch && jaNormalizedMatch ? "display_name_ja_normalized" : null,
+        !jaNormalizedMatch && jaMediumMatch ? "display_name_ja_medium" : null,
+        kanaMediumMatch ? "display_name_kana_medium" : null,
+      ].filter((item): item is string => Boolean(item));
+
+      if (jaExactMatch || jaNormalizedMatch) {
+        assessedCandidates.push({
+          ...candidate,
+          reasons,
+          matchClass: "definite" as const,
+        });
+        continue;
+      }
+
+      if (jaMediumMatch || kanaMediumMatch) {
+        assessedCandidates.push({
+          ...candidate,
+          reasons,
+          matchClass: "ambiguous" as const,
+        });
+      }
+    }
+
+    const candidateCount = assessedCandidates.length;
+    let riskStatus: NormalizationRiskStatus = "no_risk";
+
+    if (candidateCount > 3) {
+      riskStatus = "overflow";
+      findings.push({
+        code: "duplicate_normalized_name",
+        title: "duplicate normalized person name",
+        severity: "high",
+        node: "check_person_normalization_risk",
+        summary: "Too many high-similarity candidates were recalled for this person name.",
+        evidence: {
+          personId: input.personId,
+          personSlug: input.personSlug,
+          displayNameJa,
+          displayNameKana,
+          candidateCount,
+          candidates: assessedCandidates,
+        },
+      });
+    } else if (assessedCandidates.some((candidate) => candidate.matchClass === "definite")) {
+      riskStatus = "definite";
       findings.push({
         code: "duplicate_normalized_name",
         title: "duplicate normalized person name",
@@ -323,13 +322,23 @@ export async function auditPersonNormalizationRiskTool(input: {
           personId: input.personId,
           personSlug: input.personSlug,
           displayNameJa,
-          duplicateCount,
-          candidates,
+          displayNameKana,
+          candidateCount,
+          candidates: assessedCandidates,
         },
       });
+    } else if (assessedCandidates.length > 0) {
+      riskStatus = "ambiguous";
     }
 
-    return { ok: true, data: { findings } } satisfies ToolResult<{ findings: DiagnosisIssue[] }>;
+    return {
+      ok: true,
+      data: {
+        findings,
+        candidates: assessedCandidates,
+        riskStatus,
+      },
+    } satisfies ToolResult<{ findings: DiagnosisIssue[]; candidates: NormalizationCandidate[]; riskStatus: NormalizationRiskStatus }>;
   } catch (error) {
     return {
       ok: false,
