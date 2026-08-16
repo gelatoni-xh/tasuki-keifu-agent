@@ -18,6 +18,11 @@ export type ProfileWikipediaResearchResult = {
   summary: string;
   sourceUrl: string | null;
   suggestedFields: Record<string, string>;
+  suggestedPersonalBests: Array<{
+    discipline: string;
+    mark: string;
+    markMillis: number;
+  }>;
 };
 
 type WikipediaPage = {
@@ -104,6 +109,84 @@ function suggestedProfileFields(wikitext: string, missingFields: string[]) {
   return fields;
 }
 
+const personalBestFields = [
+  { discipline: "m800", names: ["800m", "800メートル", "800メートル走"] },
+  { discipline: "m1500", names: ["1500m", "1500メートル", "1500メートル走"] },
+  { discipline: "m2000sc", names: ["2000mSC", "2000m障害", "2000メートル障害"] },
+  { discipline: "m3000", names: ["3000m", "3000メートル", "3000メートル走"] },
+  { discipline: "m3000sc", names: ["3000mSC", "3000m障害", "3000メートル障害"] },
+  { discipline: "m5000", names: ["5000m", "5000メートル", "5000メートル走"] },
+  { discipline: "m10000", names: ["10000m", "10000メートル", "10000メートル走"] },
+  { discipline: "ten_mile", names: ["10マイル", "10mile", "ten mile"] },
+  { discipline: "half_marathon", names: ["ハーフマラソン", "half marathon"] },
+  { discipline: "marathon", names: ["マラソン", "フルマラソン", "marathon"] },
+];
+
+function normalizeFraction(value: string) {
+  return value.length === 1 ? Number(value) * 100 : value.length === 2 ? Number(value) * 10 : Number(value.slice(0, 3));
+}
+
+function parsePersonalBestMark(value: string) {
+  const normalized = value.replace(/[，,].*$/u, "").replace(/\s+/g, "");
+  const colonHourMatch = normalized.match(/(\d+):(\d{1,2}):(\d{1,2})(?:[.](\d{1,3}))?/);
+  if (colonHourMatch) {
+    const hours = Number(colonHourMatch[1]);
+    const minutes = Number(colonHourMatch[2]);
+    const seconds = Number(colonHourMatch[3]);
+    const milliseconds = normalizeFraction(colonHourMatch[4] ?? "0");
+    return {
+      mark: `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0").slice(0, 2)}`,
+      markMillis: (((hours * 60 + minutes) * 60) + seconds) * 1000 + milliseconds,
+    };
+  }
+
+  const hourMatch = normalized.match(/(\d+)時間(\d+)分(\d{1,2})秒(?:[.．]?(\d{1,3}))?/);
+  if (hourMatch) {
+    const hours = Number(hourMatch[1]);
+    const minutes = Number(hourMatch[2]);
+    const seconds = Number(hourMatch[3]);
+    const milliseconds = normalizeFraction(hourMatch[4] ?? "0");
+    return {
+      mark: `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0").slice(0, 2)}`,
+      markMillis: (((hours * 60 + minutes) * 60) + seconds) * 1000 + milliseconds,
+    };
+  }
+
+  const minuteMatch = normalized.match(/(\d+)(?:分|:)(\d{1,2})(?:秒(?:[.．]?(\d{1,3}))?|[.:](\d{1,3}))/);
+  if (!minuteMatch) {
+    return null;
+  }
+
+  const minutes = Number(minuteMatch[1]);
+  const seconds = Number(minuteMatch[2]);
+  const milliseconds = normalizeFraction(minuteMatch[3] ?? minuteMatch[4] ?? "0");
+  if (seconds >= 60) {
+    return null;
+  }
+
+  return {
+    mark: `${minutes}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0").slice(0, 2)}`,
+    markMillis: (minutes * 60 + seconds) * 1000 + milliseconds,
+  };
+}
+
+export function extractWikipediaPersonalBests(wikitext: string) {
+  const fields = [];
+
+  for (const definition of personalBestFields) {
+    const rawValue = fieldValue(wikitext, definition.names);
+    const parsed = rawValue ? parsePersonalBestMark(rawValue) : null;
+    if (parsed) {
+      fields.push({
+        discipline: definition.discipline,
+        ...parsed,
+      });
+    }
+  }
+
+  return fields;
+}
+
 async function fetchWikipediaPage(title: string) {
   const parameters = new URLSearchParams({
     action: "query",
@@ -162,25 +245,29 @@ async function researchProfileWikipediaImpl(
             : "Wikipedia 没有找到可安全使用的对应选手页面。",
         sourceUrl: null,
         suggestedFields: {},
+        suggestedPersonalBests: [],
       };
     }
 
     const suggestedFields = suggestedProfileFields(wikitext, input.missingFields);
+    const personalBests = extractWikipediaPersonalBests(wikitext);
     const sourceUrl = `https://ja.wikipedia.org/wiki/${encodeURIComponent(page.title ?? input.targetName)}`;
-    if (Object.keys(suggestedFields).length === 0) {
+    if (Object.keys(suggestedFields).length === 0 && personalBests.length === 0) {
       return {
         status: "not_found",
-        summary: "Wikipedia 页面存在，但没有明确提供当前缺失字段。",
+        summary: "Wikipedia 页面存在，但没有明确提供当前可写入字段。",
         sourceUrl,
         suggestedFields: {},
+        suggestedPersonalBests: [],
       };
     }
 
     return {
       status: "found",
-      summary: `Wikipedia 明确提供了 ${Object.keys(suggestedFields).length} 个缺失字段。`,
+      summary: `Wikipedia 明确提供了 ${Object.keys(suggestedFields).length} 个 profile 字段和 ${personalBests.length} 个 PB 字段。`,
       sourceUrl,
       suggestedFields,
+      suggestedPersonalBests: personalBests,
     };
   } catch (error) {
     return {
@@ -188,6 +275,7 @@ async function researchProfileWikipediaImpl(
       summary: `Wikipedia API 查询未完成：${error instanceof Error ? error.message : String(error)}`,
       sourceUrl: null,
       suggestedFields: {},
+      suggestedPersonalBests: [],
     };
   }
 }

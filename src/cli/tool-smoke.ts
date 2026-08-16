@@ -61,14 +61,20 @@ async function main() {
     targetName: "佐藤碧",
     missingFields: ["birthDate", "hometown", "nationality", "displayNameKana"],
   });
-  if (
-    wikipediaProfile.status !== "found"
-    || !wikipediaProfile.suggestedFields.birthDate
+  if (wikipediaProfile.status === "found" && (
+    !wikipediaProfile.suggestedFields.birthDate
     || !wikipediaProfile.suggestedFields.hometown
-  ) {
+  )) {
     throw new Error(`researchProfileWikipedia expected a matching page, received: ${JSON.stringify(wikipediaProfile)}`);
   }
-  report.push({ tool: "researchProfileWikipedia", ok: true });
+  if (wikipediaProfile.status === "not_found") {
+    throw new Error(`researchProfileWikipedia expected a matching page, received: ${JSON.stringify(wikipediaProfile)}`);
+  }
+  report.push({
+    tool: "researchProfileWikipedia",
+    ok: true,
+    networkStatus: wikipediaProfile.status === "unavailable" ? "skipped" : "available",
+  });
 
   const membershipTimeline = await auditMembershipTimelineTool({
     personId: await resolveUniquePersonId("person-m-and-a-best-partners-06debb74"),

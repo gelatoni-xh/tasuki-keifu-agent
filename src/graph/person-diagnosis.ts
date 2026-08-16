@@ -201,13 +201,14 @@ async function researchProfileWikipediaNode(state: PersonDiagnosisState) {
     ? profileFinding.evidence.missing.filter((field): field is string => typeof field === "string")
     : [];
 
-  if (missingFields.length === 0) {
+  if (!state.targetDisplayNameJa) {
     return {
       profileWikipediaResearch: {
         status: "not_needed",
-        summary: "Profile 没有需要补查的字段。",
+        summary: "人物未解析，跳过 Wikipedia 查询。",
         sourceUrl: null,
         suggestedFields: {},
+        suggestedPersonalBests: [],
       },
     } satisfies Partial<PersonDiagnosisState>;
   }
@@ -218,31 +219,50 @@ async function researchProfileWikipediaNode(state: PersonDiagnosisState) {
   });
 
   if (research.status === "found") {
+    const findings = [
+      ...state.findings,
+      ...(Object.keys(research.suggestedFields).length > 0
+        ? [{
+            code: "profile_wikipedia_data_available",
+            title: "Wikipedia profile data available",
+            severity: "low" as const,
+            node: "research_profile_wikipedia",
+            summary: research.summary,
+            evidence: {
+              personId: state.targetPersonId,
+              personSlug: state.targetPersonSlug,
+              sourceUrl: research.sourceUrl,
+              suggestedFields: research.suggestedFields,
+            },
+          }]
+        : []),
+      ...(research.suggestedPersonalBests.length > 0
+        ? [{
+            code: "wikipedia_personal_bests_available",
+            title: "Wikipedia personal best data available",
+            severity: "low" as const,
+            node: "research_profile_wikipedia",
+            summary: research.summary,
+            evidence: {
+              personId: state.targetPersonId,
+              personSlug: state.targetPersonSlug,
+              sourceUrl: research.sourceUrl,
+              personalBests: research.suggestedPersonalBests,
+            },
+          }]
+        : []),
+    ];
+
     return {
       profileWikipediaResearch: research,
-      findings: [
-        ...state.findings,
-        {
-          code: "profile_wikipedia_data_available",
-          title: "Wikipedia profile data available",
-          severity: "low",
-          node: "research_profile_wikipedia",
-          summary: research.summary,
-          evidence: {
-            personId: state.targetPersonId,
-            personSlug: state.targetPersonSlug,
-            sourceUrl: research.sourceUrl,
-            suggestedFields: research.suggestedFields,
-          },
-        },
-      ],
-      resultNotes: [...state.resultNotes, `Wikipedia profile 查询：${research.summary}`],
+      findings,
+      resultNotes: [...state.resultNotes, `Wikipedia 查询：${research.summary}`],
     } satisfies Partial<PersonDiagnosisState>;
   }
 
   return {
     profileWikipediaResearch: research,
-    resultNotes: [...state.resultNotes, `Wikipedia profile 查询未补到字段：${research.summary}`],
+    resultNotes: [...state.resultNotes, `Wikipedia 查询未补到字段：${research.summary}`],
   } satisfies Partial<PersonDiagnosisState>;
 }
 
@@ -390,6 +410,29 @@ function summarizeFindings(state: PersonDiagnosisState) {
   } satisfies Partial<PersonDiagnosisState>;
 }
 
+function collectEvidenceIds(value: unknown, key: "membershipId" | "personalBestId") {
+  const ids = new Set<string>();
+
+  function visit(current: unknown): void {
+    if (Array.isArray(current)) {
+      current.forEach(visit);
+      return;
+    }
+    if (!current || typeof current !== "object") {
+      return;
+    }
+
+    const record = current as Record<string, unknown>;
+    if (typeof record[key] === "string" && record[key].trim()) {
+      ids.add(record[key]);
+    }
+    Object.values(record).forEach(visit);
+  }
+
+  visit(value);
+  return [...ids].sort();
+}
+
 function buildActionPlanNode(state: PersonDiagnosisState) {
   const actionsByCode: Record<string, SuggestedAction> = {
     profile_wikipedia_data_available: {
@@ -399,12 +442,60 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       rationale: "Wikipedia supplied explicit values for one or more currently missing profile fields.",
       relatedIssueCodes: ["profile_wikipedia_data_available"],
     },
+    wikipedia_personal_bests_available: {
+      code: "upsert_personal_bests_from_wikipedia",
+      title: "Upsert personal bests from Wikipedia",
+      priority: "low",
+      rationale: "Wikipedia supplied explicit personal best values for this person.",
+      relatedIssueCodes: ["wikipedia_personal_bests_available"],
+    },
     multiple_current_memberships: {
-      code: "review_membership_timeline",
-      title: "Review concurrent memberships",
-      priority: "high",
-      rationale: "Multiple current memberships need manual review before any downstream use.",
-      relatedIssueCodes: ["multiple_current_memberships"],
+      code: "mark_memberships_conflicting",
+      title: "Mark conflicting memberships",
+      priority: "low",
+      rationale: "Membership timeline anomalies should not remain trusted until reviewed.",
+      relatedIssueCodes: [
+        "multiple_current_memberships",
+        "high_school_starts_after_university",
+        "membership_order_anomaly",
+        "same_type_membership_overlap",
+      ],
+    },
+    high_school_starts_after_university: {
+      code: "mark_memberships_conflicting",
+      title: "Mark conflicting memberships",
+      priority: "low",
+      rationale: "Membership timeline anomalies should not remain trusted until reviewed.",
+      relatedIssueCodes: [
+        "multiple_current_memberships",
+        "high_school_starts_after_university",
+        "membership_order_anomaly",
+        "same_type_membership_overlap",
+      ],
+    },
+    membership_order_anomaly: {
+      code: "mark_memberships_conflicting",
+      title: "Mark conflicting memberships",
+      priority: "low",
+      rationale: "Membership timeline anomalies should not remain trusted until reviewed.",
+      relatedIssueCodes: [
+        "multiple_current_memberships",
+        "high_school_starts_after_university",
+        "membership_order_anomaly",
+        "same_type_membership_overlap",
+      ],
+    },
+    same_type_membership_overlap: {
+      code: "mark_memberships_conflicting",
+      title: "Mark conflicting memberships",
+      priority: "low",
+      rationale: "Membership timeline anomalies should not remain trusted until reviewed.",
+      relatedIssueCodes: [
+        "multiple_current_memberships",
+        "high_school_starts_after_university",
+        "membership_order_anomaly",
+        "same_type_membership_overlap",
+      ],
     },
     duplicate_normalized_name: {
       code: "review_name_normalization",
@@ -414,18 +505,18 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       relatedIssueCodes: ["duplicate_normalized_name"],
     },
     duplicate_personal_bests: {
-      code: "review_personal_bests",
-      title: "Review duplicate PB records",
-      priority: "medium",
-      rationale: "Duplicate PB rows should be reconciled manually.",
-      relatedIssueCodes: ["duplicate_personal_bests"],
+      code: "mark_personal_bests_conflicting",
+      title: "Mark conflicting personal bests",
+      priority: "low",
+      rationale: "PB conflicts without Wikipedia evidence should not remain trusted until reviewed.",
+      relatedIssueCodes: ["duplicate_personal_bests", "conflicting_personal_best"],
     },
     conflicting_personal_best: {
-      code: "review_personal_bests",
-      title: "Review conflicting PB records",
-      priority: "high",
-      rationale: "Conflicting PB rows should be reconciled manually.",
-      relatedIssueCodes: ["conflicting_personal_best"],
+      code: "mark_personal_bests_conflicting",
+      title: "Mark conflicting personal bests",
+      priority: "low",
+      rationale: "PB conflicts without Wikipedia evidence should not remain trusted until reviewed.",
+      relatedIssueCodes: ["duplicate_personal_bests", "conflicting_personal_best"],
     },
   };
 
@@ -488,6 +579,8 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       : `${actions.length} suggested manual actions prepared.`;
 
   const actionBundleItems: ActionBundleItem[] = actions.map((action, index) => {
+    const relatedFindings = state.findings.filter((finding) => action.relatedIssueCodes.includes(finding.code));
+    const relatedFindingCodes = [...new Set(relatedFindings.map((finding) => finding.code))].sort();
     const mergePayload = action.code === "merge_person_duplicate" && nameMergeCandidate && isExactNormalizedNameMatch && canChooseCanonical
       ? {
           canonicalPersonId: targetIsTemporary ? nameMergeCandidate.personId : state.targetPersonId,
@@ -497,26 +590,69 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
           researchSummary: state.findings.find((finding) => finding.node === "research_name_identity")?.summary ?? null,
         }
       : null;
+    const wikipediaSourceUrl = state.profileWikipediaResearch?.sourceUrl ?? null;
+    const actionPayload =
+      action.code === "backfill_profile_from_wikipedia"
+        ? {
+            personId: state.targetPersonId,
+            personSlug: state.targetPersonSlug,
+            sourceUrl: wikipediaSourceUrl,
+            suggestedFields: state.profileWikipediaResearch?.suggestedFields ?? {},
+          }
+        : action.code === "upsert_personal_bests_from_wikipedia"
+          ? {
+              personId: state.targetPersonId,
+              personSlug: state.targetPersonSlug,
+              sourceUrl: wikipediaSourceUrl,
+              personalBests: state.profileWikipediaResearch?.suggestedPersonalBests ?? [],
+            }
+          : action.code === "mark_memberships_conflicting"
+            ? {
+                personId: state.targetPersonId,
+                membershipIds: collectEvidenceIds(relatedFindings.map((finding) => finding.evidence), "membershipId"),
+                findingCodes: relatedFindings.map((finding) => finding.code).sort(),
+              }
+            : action.code === "mark_personal_bests_conflicting"
+              ? {
+                  personId: state.targetPersonId,
+                  personalBestIds: collectEvidenceIds(relatedFindings.map((finding) => finding.evidence), "personalBestId"),
+                  findingCodes: relatedFindings.map((finding) => finding.code).sort(),
+                }
+              : null;
     const mergeKey = mergePayload
       ? [mergePayload.canonicalPersonId, mergePayload.duplicatePersonId].join(":")
-      : state.targetPersonId ?? "unresolved";
+      : action.code === "backfill_profile_from_wikipedia"
+        ? Object.entries(state.profileWikipediaResearch?.suggestedFields ?? {})
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([field, value]) => `${field}=${value}`)
+            .join("|")
+        : action.code === "upsert_personal_bests_from_wikipedia"
+          ? (state.profileWikipediaResearch?.suggestedPersonalBests ?? [])
+              .map((personalBest) => `${personalBest.discipline}=${personalBest.markMillis}`)
+              .sort()
+              .join("|")
+          : action.code === "mark_memberships_conflicting"
+            ? collectEvidenceIds(relatedFindings.map((finding) => finding.evidence), "membershipId").join(":")
+            : action.code === "mark_personal_bests_conflicting"
+              ? collectEvidenceIds(relatedFindings.map((finding) => finding.evidence), "personalBestId").join(":")
+              : state.targetPersonId ?? "unresolved";
 
     return {
       code: action.code,
       title: action.title,
       order: index + 1,
       rationale: action.rationale,
-      relatedIssueCodes: action.relatedIssueCodes,
-      payload: mergePayload ?? {
+      relatedIssueCodes: relatedFindingCodes,
+      payload: mergePayload ?? actionPayload ?? {
         personId: state.targetPersonId,
         personSlug: state.targetPersonSlug,
-        findings: state.findings.filter((finding) => action.relatedIssueCodes.includes(finding.code)),
+        findings: relatedFindings,
       },
       idempotencyKey: [
         "person",
         mergeKey,
         action.code,
-        [...action.relatedIssueCodes].sort().join(",") || "no_issue",
+        relatedFindingCodes.join(",") || "no_issue",
       ].join(":"),
     };
   });
@@ -551,10 +687,6 @@ function evaluateActionBundleRiskNode(state: PersonDiagnosisState) {
     reasons.push("当前归一化 finding 尚未给出明确的保留记录和删除记录，不能自动合并。");
   }
 
-  if (items.some((item) => item.code === "review_membership_timeline" || item.code === "review_personal_bests")) {
-    reasons.push("membership 和 PB 修复规则尚未进入第一批自动写入范围。");
-  }
-
   if (reasons.length > 0) {
     return {
       actionRiskAssessment: {
@@ -581,11 +713,21 @@ function evaluateActionBundleRiskNode(state: PersonDiagnosisState) {
     } satisfies Partial<PersonDiagnosisState>;
   }
 
-  if (items.every((item) => item.code === "merge_person_duplicate")) {
+  const safeActionCodes = new Set([
+    "merge_person_duplicate",
+    "backfill_profile_from_wikipedia",
+    "upsert_personal_bests_from_wikipedia",
+    "mark_memberships_conflicting",
+    "mark_personal_bests_conflicting",
+  ]);
+
+  if (items.every((item) => safeActionCodes.has(item.code))) {
     return {
       actionRiskAssessment: {
-        level: "medium",
-        reasons: ["姓名身份已由 LLM 研究确认，且 action bundle 已明确保留与合并记录。"],
+        level: items.some((item) => item.code === "merge_person_duplicate") ? "medium" : "low",
+        reasons: items.some((item) => item.code === "merge_person_duplicate")
+          ? ["姓名身份已由 LLM 研究确认，且 action bundle 已明确保留与合并记录。"]
+          : ["动作只会补充 Wikipedia 明确字段或标记已有数据冲突。"],
         executionStatus: "planned",
       },
       runtimeStatus: "completed",

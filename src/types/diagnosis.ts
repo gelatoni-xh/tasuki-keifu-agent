@@ -40,6 +40,11 @@ export const ProfileWikipediaResearchSchema = z.object({
   summary: z.string(),
   sourceUrl: z.string().nullable(),
   suggestedFields: z.record(z.string(), z.string()).default({}),
+  suggestedPersonalBests: z.array(z.object({
+    discipline: z.string(),
+    mark: z.string(),
+    markMillis: z.number().int(),
+  })).default([]),
 });
 
 export const ActionBundleSchema = z.object({

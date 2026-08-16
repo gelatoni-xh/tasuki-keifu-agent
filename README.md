@@ -58,7 +58,7 @@ Current coverage:
 - `smoke:nodes`: graph node-path regression for key resolution branches, including a real ambiguous-name path through `research_name_identity`
 - `inspect`: recent agent runs and diagnosis results
 
-The current release records diagnosis results, action bundles, risk holds, and batch audit data in the agent database. The first constrained business write, `merge_person_duplicate`, is available only behind the explicit write-mode safeguards below.
+The current release records diagnosis results, action bundles, risk holds, and batch audit data in the agent database. Registered business writes are available only behind the explicit write-mode safeguards below.
 
 ## Governance Batch
 
@@ -71,7 +71,8 @@ The batch runner compares the latest `Person` / `Membership` / `PersonalBest` up
 
 - Default mode is dry-run.
 - `--execute` still remains dry-run unless both `TASUKI_AGENT_WRITE_ENABLED=true` and `TASUKI_KEIFU_BUSINESS_WRITE_DATABASE_URL` are configured.
-- The first registered business write is `merge_person_duplicate`: one LLM-confirmed, normalized-name-identical pair with a clear non-temporary canonical slug.
-- The executor re-reads and row-locks both people, moves related records, preserves name variants, clears relation caches, writes a business `AuditLog`, then removes the duplicate in one transaction.
-- Membership, PB, and profile actions remain held until they have their own explicit execution rules.
+- `merge_person_duplicate` merges one LLM-confirmed, normalized-name-identical pair with a clear non-temporary canonical slug. The executor locks both people, moves related records, preserves name variants, clears relation caches, writes a business `AuditLog`, then removes the duplicate in one transaction.
+- `backfill_profile_from_wikipedia` fills only missing profile fields from an exact-match Wikipedia page.
+- `upsert_personal_bests_from_wikipedia` writes explicit Wikipedia PBs, preserving existing stage-specific PBs when a discipline already has multiple records.
+- `mark_memberships_conflicting` and `mark_personal_bests_conflicting` mark internally inconsistent records as `conflicting` without deleting records or guessing replacement facts.
 - A high-risk person is held without affecting the rest of the batch.
