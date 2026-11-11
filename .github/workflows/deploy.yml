@@ -66,6 +66,7 @@ jobs:
             cp /tmp/tasuki-keifu-agent-deploy/docker-compose.prod.yml /opt/apps/tasuki-keifu-agent/docker-compose.prod.yml
             previous_image=$(sudo docker image inspect tasuki-keifu-agent:latest --format '{{.Id}}')
             sudo docker load -i /tmp/tasuki-keifu-agent-deploy/tasuki-keifu-agent-image.tar.gz
+            sudo docker compose -f docker-compose.prod.yml run --rm governance-worker setup-checkpoints
             sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
             healthy=false
             for attempt in $(seq 1 36); do
