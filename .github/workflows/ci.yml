@@ -32,3 +32,6 @@ jobs:
 
       - name: Type check
         run: npm run typecheck
+
+      - name: Governance unit tests
+        run: npm run test:governance
