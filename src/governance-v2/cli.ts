@@ -12,7 +12,7 @@ import { deliverNotifications } from "./notifications.js";
 
 async function main() {
   const [command, arg] = process.argv.slice(2);
-  const url = process.env.GOVERNANCE_DATABASE_URL ?? process.env.DATABASE_URL;
+  const url = process.env.GOVERNANCE_DATABASE_URL;
   if (!url)
     throw new Error(
       "GOVERNANCE_DATABASE_URL must point to the main business database with governance schema",

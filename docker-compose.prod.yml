@@ -6,8 +6,6 @@ services:
     env_file: .env.governance
     environment:
       NODE_OPTIONS: --max-old-space-size=160
-      GOVERNANCE_DATABASE_URL: ${GOVERNANCE_DATABASE_URL:?Set runtime database URL in .env.governance}
-      GOVERNANCE_READ_DATABASE_URL: ${GOVERNANCE_READ_DATABASE_URL:?Set read database URL in .env.governance}
       GOVERNANCE_PAYLOAD_DIR: /var/lib/tasuki-governance/payloads
       GOVERNANCE_WRITE_ENABLED: "false"
       GOVERNANCE_MAIL_ENABLED: "false"
@@ -30,7 +28,6 @@ services:
     env_file: .env.governance
     environment:
       NODE_OPTIONS: --max-old-space-size=128
-      GOVERNANCE_DATABASE_URL: ${GOVERNANCE_DATABASE_URL:?Set runtime database URL in .env.governance}
       GOVERNANCE_PAYLOAD_DIR: /var/lib/tasuki-governance/payloads
       GOVERNANCE_MAIL_ENABLED: "false"
     networks: [tasuki-keifu]
