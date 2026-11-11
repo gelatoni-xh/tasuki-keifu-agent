@@ -1,5 +1,9 @@
 # tasuki-keifu-agent
 
+## New event governance
+
+The current governance service is event and batch driven. It uses the main Tasuki database and replaces the previous web Agent process when deployed; the old Agent database is left untouched and is not migrated into governance records. See [`docs/governance-v2.md`](docs/governance-v2.md) for the runtime model, production environment file, migration order, and rollback behavior. The worker starts with business writes and mail disabled; enable them only for an explicitly reviewed pilot.
+
 [![中文](https://img.shields.io/badge/阅读中文-README.md-1677ff?style=flat-square)](README.md) [![English](https://img.shields.io/badge/Read%20English-README.en.md-555?style=flat-square)](README.en.md) [![日本語](https://img.shields.io/badge/日本語で読む-README.ja.md-555?style=flat-square)](README.ja.md)
 
 基于 LangGraph 的内部数据诊断 Agent，用于 `tasuki-keifu`。

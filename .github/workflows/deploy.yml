@@ -34,6 +34,9 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Governance unit tests
+        run: npm run test:governance
+
       - name: Build deploy image archive
         run: |
           docker build -t tasuki-keifu-agent:latest .
@@ -57,11 +60,33 @@ jobs:
           script: |
             set -euo pipefail
             mkdir -p /opt/apps/tasuki-keifu-agent
-            cp /tmp/tasuki-keifu-agent-deploy/docker-compose.prod.yml /opt/apps/tasuki-keifu-agent/docker-compose.prod.yml
-            test -f /opt/apps/tasuki-keifu-agent/.env.production
-            sudo docker load -i /tmp/tasuki-keifu-agent-deploy/tasuki-keifu-agent-image.tar.gz
             cd /opt/apps/tasuki-keifu-agent
-            sudo docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+            test -f .env.governance
+            cp docker-compose.prod.yml docker-compose.prod.yml.previous
+            cp /tmp/tasuki-keifu-agent-deploy/docker-compose.prod.yml /opt/apps/tasuki-keifu-agent/docker-compose.prod.yml
+            previous_image=$(sudo docker image inspect tasuki-keifu-agent:latest --format '{{.Id}}')
+            sudo docker load -i /tmp/tasuki-keifu-agent-deploy/tasuki-keifu-agent-image.tar.gz
+            if ! sudo docker compose -f docker-compose.prod.yml run --rm governance-worker node --import tsx src/governance-v2/cli.ts setup-checkpoints; then
+              cp docker-compose.prod.yml.previous docker-compose.prod.yml
+              sudo docker image tag "$previous_image" tasuki-keifu-agent:latest
+              rm -f docker-compose.prod.yml.previous
+              exit 1
+            fi
+            sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            healthy=false
+            for attempt in $(seq 1 36); do
+              if [ "$(sudo docker inspect tasuki-keifu-governance-worker --format '{{.State.Health.Status}}' 2>/dev/null || true)" = healthy ]; then
+                healthy=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "$healthy" != true ]; then
+              sudo docker compose -f docker-compose.prod.yml logs --tail=100 governance-worker || true
+              cp docker-compose.prod.yml.previous docker-compose.prod.yml
+              sudo docker image tag "$previous_image" tasuki-keifu-agent:latest
+              sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              exit 1
+            fi
+            rm -f docker-compose.prod.yml.previous
             sudo docker image prune -f
-            sleep 5
-            curl -fsS http://127.0.0.1:3040/health >/dev/null
