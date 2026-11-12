@@ -14,6 +14,7 @@ import {
   type Membership,
 } from "../contracts.js";
 import { governMemberships, verifyFacts } from "../agents.js";
+import { parseMailConfig } from "../notifications.js";
 import type { Context, Resolution } from "../contracts.js";
 
 const membership = (overrides: Partial<Membership> = {}): Membership => ({
@@ -151,6 +152,8 @@ const res: Resolution = {
     networkCalls: 0,
     inputTokens: 0,
     outputTokens: 0,
+    estimatedCostUsd: 0,
+    llmModels: [],
     durationMs: 0,
     stoppedReasons: [],
   },
@@ -334,4 +337,40 @@ test("batch mail uses natural language and does not claim dry run repairs", asyn
   assert.match(body, /计划修复 2 项/);
   assert.match(body, /官方资料不足/);
   assert.doesNotMatch(body, /"subjectRef"/);
+});
+test("governance mail accepts gelatoni-xh MAIL_CONFIG shapes", () => {
+  assert.deepEqual(
+    parseMailConfig(
+      JSON.stringify({
+        provider: "smtp",
+        host: "smtp.163.com",
+        port: 465,
+        username: "sender@example.com",
+        password: "app-password",
+        from: "sender@example.com",
+        to: "recipient@example.com",
+      }),
+    ),
+    {
+      provider: "smtp",
+      host: "smtp.163.com",
+      port: 465,
+      username: "sender@example.com",
+      password: "app-password",
+      from: "sender@example.com",
+      to: "recipient@example.com",
+    },
+  );
+  assert.equal(
+    parseMailConfig(
+      JSON.stringify({
+        provider: "resend",
+        api_key: "key",
+        from: "Reports <reports@example.com>",
+        to: "recipient@example.com",
+      }),
+    ).provider,
+    "resend",
+  );
+  assert.throws(() => parseMailConfig('{"provider":"smtp"}'), /requires/);
 });

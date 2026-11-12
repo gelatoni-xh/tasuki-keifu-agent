@@ -17,10 +17,10 @@ import {
 import {
   buildPlan,
   governMemberships,
-  normalizeOrganizations,
-  normalizePeople,
   verifyFacts,
 } from "./agents.js";
+import { initialNormalization, projectNormalization, lightBatch, crossCheck,
+  validateCrossCheck, finalizeNormalization, adjudicate, reassess, deepResearch, type NormalizationState } from "./normalization.js";
 import type { Researcher } from "./research.js";
 
 const State = Annotation.Root({
@@ -29,6 +29,7 @@ const State = Annotation.Root({
   context: Annotation<Context>(),
   mode: Annotation<Manifest["mode"]>(),
   resolution: Annotation<Resolution>(),
+  normalization: Annotation<NormalizationState>(),
   membership: Annotation<AgentResult>(),
   facts: Annotation<AgentResult>(),
   plan: Annotation<Plan>(),
@@ -36,8 +37,9 @@ const State = Annotation.Root({
 export type BatchGraphState = typeof State.State;
 export const graphNodeNames = [
   "load_batch_context",
-  "normalize_organization",
-  "normalize_person",
+  "organization_rules", "organization_light_batch", "person_rules", "person_light_batch",
+  "prepare_cross_check", "normalization_cross_check", "validate_cross_check", "organization_adjudication",
+  "affected_person_reassessment", "normalization_deep_research", "finalize_normalization",
   "govern_membership",
   "verify_person_facts",
   "aggregate_governance_result",
@@ -75,38 +77,6 @@ export function buildBatchGraph(deps: {
         throw new Error(`Injected interruption at ${name}`);
       return value;
     };
-  // Subgraphs share the parent's persistent checkpointer and namespace automatically.
-  const orgGraph = new StateGraph(State)
-    .addNode(
-      "org_resolve_identity",
-      node("org_resolve_identity", async (s) => ({
-        resolution: await normalizeOrganizations(
-          s.batchId,
-          s.input,
-          s.context,
-          deps.research,
-        ),
-      })),
-    )
-    .addEdge(START, "org_resolve_identity")
-    .addEdge("org_resolve_identity", END)
-    .compile({ name: "organization_normalization_graph" });
-  const personGraph = new StateGraph(State)
-    .addNode(
-      "person_resolve_identity",
-      node("person_resolve_identity", async (s) => ({
-        resolution: await normalizePeople(
-          s.batchId,
-          s.input,
-          s.context,
-          s.resolution,
-          deps.research,
-        ),
-      })),
-    )
-    .addEdge(START, "person_resolve_identity")
-    .addEdge("person_resolve_identity", END)
-    .compile({ name: "person_normalization_graph" });
   const membershipGraph = new StateGraph(State)
     .addNode(
       "resolve_membership_rules_and_conflicts",
@@ -147,10 +117,53 @@ export function buildBatchGraph(deps: {
         context: await deps.loadContext(),
         membership: skipped("membership"),
         facts: skipped("person_facts"),
+        normalization: initialNormalization(),
       })),
     )
-    .addNode("normalize_organization", orgGraph)
-    .addNode("normalize_person", personGraph)
+    .addNode("organization_rules", node("organization_rules", async s => {
+      const normalization = structuredClone(s.normalization), metrics = emptyMetrics();
+      const resolution = await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, false);
+      metrics.ruleDecisions += s.input.organizations.length;
+      return { normalization, resolution };
+    }))
+    .addNode("organization_light_batch", node("organization_light_batch", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await lightBatch("organization", s.normalization, base, s.context, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, false) };
+    }))
+    .addNode("person_rules", node("person_resolve_identity", async s => {
+      const normalization = structuredClone(s.normalization), metrics = structuredClone(s.resolution.metrics);
+      const resolution = await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true);
+      metrics.ruleDecisions += s.input.rows.length;
+      return { normalization, resolution };
+    }))
+    .addNode("person_light_batch", node("person_light_batch", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await lightBatch("person", s.normalization, base, s.context, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
+    }))
+    .addNode("prepare_cross_check", node("prepare_cross_check", s => ({ normalization: structuredClone(s.normalization) })))
+    .addNode("normalization_cross_check", node("normalization_cross_check", async s => {
+      const resolution = structuredClone(s.resolution);
+      return { resolution, normalization: await crossCheck(s.input, s.context, s.normalization, resolution, deps.research) };
+    }))
+    .addNode("validate_cross_check", node("validate_cross_check", s => ({ normalization: validateCrossCheck(s.input, s.normalization, s.context) })))
+    .addNode("organization_adjudication", node("organization_adjudication", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await adjudicate(s.input, s.context, s.normalization, base, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
+    }))
+    .addNode("affected_person_reassessment", node("affected_person_reassessment", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await reassess(s.input, s.context, s.normalization, base, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
+    }))
+    .addNode("normalization_deep_research", node("normalization_deep_research", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await deepResearch(s.normalization, base, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
+    }))
+    .addNode("finalize_normalization", node("finalize_normalization", s => ({ resolution: finalizeNormalization(s.input, s.normalization, s.resolution) })))
     .addNode("govern_membership", membershipGraph)
     .addNode("verify_person_facts", factsGraph)
     .addNode(
@@ -168,9 +181,18 @@ export function buildBatchGraph(deps: {
       })),
     )
     .addEdge(START, "load_batch_context")
-    .addEdge("load_batch_context", "normalize_organization")
-    .addEdge("normalize_organization", "normalize_person")
-    .addConditionalEdges("normalize_person", route_membership_agent, [
+    .addEdge("load_batch_context", "organization_rules")
+    .addEdge("organization_rules", "organization_light_batch")
+    .addEdge("organization_light_batch", "person_rules")
+    .addEdge("person_rules", "person_light_batch")
+    .addEdge("person_light_batch", "prepare_cross_check")
+    .addEdge("prepare_cross_check", "normalization_cross_check")
+    .addEdge("normalization_cross_check", "validate_cross_check")
+    .addEdge("validate_cross_check", "organization_adjudication")
+    .addEdge("organization_adjudication", "affected_person_reassessment")
+    .addEdge("affected_person_reassessment", "normalization_deep_research")
+    .addEdge("normalization_deep_research", "finalize_normalization")
+    .addConditionalEdges("finalize_normalization", route_membership_agent, [
       "govern_membership",
       "verify_person_facts",
       "aggregate_governance_result",

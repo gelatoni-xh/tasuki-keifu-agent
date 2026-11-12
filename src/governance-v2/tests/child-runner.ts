@@ -18,7 +18,8 @@ try {
     new PostgresSaver(pool, undefined, { schema: "governance_checkpoint" }),
     {
       writeEnabled: true,
-      researcher: async () => {
+      researcher: async request => {
+        if (request.kind === "normalization_cross_check") return { crossAnswer: { issues: [] }, evidence: [] };
         throw new Error("Unexpected research");
       },
     },

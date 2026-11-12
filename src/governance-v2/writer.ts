@@ -331,7 +331,9 @@ export class BusinessWriter {
             op.row.grade ?? null,
             op.row.notes ?? null,
             plan.sourceId,
-            !!op.row.mark && markMillis(op.row.mark) !== null,
+            !/\bDNS\b|欠/u.test(op.row.notes ?? "") &&
+              ((!!op.row.mark && markMillis(op.row.mark) !== null) ||
+                /\b(?:DNF|DQ)\b/u.test(op.row.notes ?? "")),
           ],
         );
         break;
