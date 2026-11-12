@@ -8,7 +8,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { GovernanceDB, createGovernancePool } from "./database.js";
 import { DirectoryPayloadStore } from "./storage.js";
 import { EventRunner } from "./runner.js";
-import { deliverNotifications } from "./notifications.js";
+import { createMailTransport, deliverNotifications, parseMailConfig } from "./notifications.js";
 
 async function main() {
   const [command, arg] = process.argv.slice(2);
@@ -85,25 +85,7 @@ async function main() {
     if (command === "deliver" || command === "mail-worker") {
       if (process.env.GOVERNANCE_MAIL_ENABLED !== "true")
         throw new Error("Real delivery requires GOVERNANCE_MAIL_ENABLED=true");
-      const { createTransport } = await import("nodemailer");
-      const host = process.env.GOVERNANCE_SMTP_HOST,
-        from = process.env.GOVERNANCE_MAIL_FROM,
-        to = process.env.GOVERNANCE_MAIL_TO;
-      if (!host || !from || !to)
-        throw new Error("SMTP host, from and to are required");
-      const transport = createTransport({
-        host,
-        port: Number(process.env.GOVERNANCE_SMTP_PORT ?? 465),
-        secure: process.env.GOVERNANCE_SMTP_SECURE !== "false",
-        connectionTimeout: 15000,
-        socketTimeout: 25000,
-        auth: process.env.GOVERNANCE_SMTP_USER
-          ? {
-              user: process.env.GOVERNANCE_SMTP_USER,
-              pass: process.env.GOVERNANCE_SMTP_PASSWORD,
-            }
-          : undefined,
-      });
+      const transport = createMailTransport(parseMailConfig());
       let stopped = false;
       process.once("SIGTERM", () => {
         stopped = true;
@@ -114,7 +96,7 @@ async function main() {
       try {
         do {
           const sent = await deliverNotifications(pool, (msg) =>
-            transport.sendMail({ ...msg, from, to }).then(() => {}),
+            transport(msg),
           );
           if (sent) console.log(JSON.stringify({ sent }));
           if (command === "deliver") break;
@@ -122,7 +104,7 @@ async function main() {
             await new Promise((resolve) => setTimeout(resolve, 5000));
         } while (!stopped);
       } finally {
-        transport.close();
+        // Transport closes with the worker process.
       }
       return;
     }
