@@ -1,4 +1,6 @@
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
+import { journalResearch } from "./research-journal.js";
+import { NORMALIZATION_POLICY_VERSION } from "./normalization.js";
 import { withBusinessResearchContext } from "./research-context.js";
 import { buildBatchGraph } from "./graph.js";
 import {
@@ -26,6 +28,8 @@ export type RunnerOptions = {
   failAfterNode?: string;
   afterCommit?: () => Promise<void>;
   beforeApply?: () => Promise<void>;
+  inputCostPerMillionUsd?: number;
+  outputCostPerMillionUsd?: number;
 };
 export class EventRunner {
   constructor(
@@ -106,31 +110,36 @@ export class EventRunner {
     let fresh = false;
     for (let n = 0; n < (this.options.maxAttempts ?? 3); n++) {
       const attempt = await this.db.attempt(task, batch, fresh);
-      const reserve = async () =>
+      const reserve = async (kind: import("./research.js").ResearchRequest["kind"]) =>
         this.db.fenced(task, async (c) => {
-          const used = (
-            await c.query(
-              'SELECT COALESCE(sum(COALESCE((metrics->>\'researchReservations\')::int,0)),0)::int AS n FROM governance."BatchAttempt" WHERE "batchId"=$1',
-              [batch.id],
-            )
-          ).rows[0].n;
-          if (used >= (this.options.research?.maxRequests ?? 3)) return false;
+          const normalization = kind.startsWith("normalization_") || kind === "organization_adjudication";
+          const field = normalization ? "normalizationReservations" : "researchReservations";
+          const used = (await c.query(
+            `SELECT COALESCE(sum(COALESCE((metrics->>$2)::int,0)),0)::int AS n FROM governance."BatchAttempt" WHERE "batchId"=$1`,
+            [batch.id, field],
+          )).rows[0].n;
+          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3)) return false;
           await c.query(
-            "UPDATE governance.\"BatchAttempt\" SET metrics=jsonb_set(COALESCE(metrics,'{}'::jsonb),'{researchReservations}',to_jsonb(COALESCE((metrics->>'researchReservations')::int,0)+1)) WHERE id=$1",
-            [attempt.id],
+            `UPDATE governance."BatchAttempt" SET metrics=jsonb_set(COALESCE(metrics,'{}'::jsonb),ARRAY[$2::text],to_jsonb(COALESCE((metrics->>$2)::int,0)+1)) WHERE id=$1`,
+            [attempt.id, field],
           );
           return true;
         });
-      const research = withBusinessResearchContext(
+      const research = journalResearch(this.db, task, attempt.id, {
+        policy: NORMALIZATION_POLICY_VERSION, model: this.options.research?.model,
+        endpoint: this.options.research?.baseUrl,
+      }, withBusinessResearchContext(
         this.db,
         this.options.researcher ??
           createResearcher({
             ...this.options.research,
             timeoutMs: this.options.research?.timeoutMs ?? 25000,
             maxRequests: this.options.research?.maxRequests ?? 3,
+            inputCostPerMillionUsd: this.options.inputCostPerMillionUsd,
+            outputCostPerMillionUsd: this.options.outputCostPerMillionUsd,
             reserve,
           }),
-      );
+      ));
       const graph = buildBatchGraph({
         loadContext: () => this.db.loadContext(task, input),
         research,
@@ -257,6 +266,12 @@ export class EventRunner {
     error?: string,
     queryable: Pick<import("pg").Pool, "query"> = this.db.pool,
   ): Promise<Report> {
+    const taskRow = (
+      await queryable.query(
+        'SELECT "createdAt","completedAt" FROM governance."EventImportTask" WHERE id=$1',
+        [task.id],
+      )
+    ).rows[0];
     const batches = (
       await queryable.query(
         'SELECT status,summary FROM governance."GovernanceBatch" WHERE "eventTaskId"=$1',
@@ -269,11 +284,76 @@ export class EventRunner {
         [task.id],
       )
     ).rows;
+    const findingCounts = (
+      await queryable.query(
+        `SELECT f."resolutionStatus",count(*)::int AS count
+         FROM governance."GovernanceFinding" f
+         JOIN governance."GovernanceBatch" b ON b.id=f."batchId"
+         WHERE b."eventTaskId"=$1 GROUP BY f."resolutionStatus"`,
+        [task.id],
+      )
+    ).rows;
+    const attemptStats = (
+      await queryable.query(
+        `SELECT count(*)::int AS "attemptCount",
+                count(*) FILTER (WHERE ba."attemptNo">1)::int AS "retryCount",
+                COALESCE(sum(GREATEST(0,extract(epoch FROM (COALESCE(ba."endedAt",clock_timestamp())-ba."startedAt"))*1000)),0)::bigint AS "attemptDurationMs",
+                COALESCE(sum(GREATEST(0,extract(epoch FROM (COALESCE(ba."endedAt",clock_timestamp())-ba."startedAt"))*1000)) FILTER (WHERE ba."attemptNo">1),0)::bigint AS "retryDurationMs",
+                min(ba."startedAt") AS "firstAttemptAt"
+         FROM governance."BatchAttempt" ba
+         JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
+         WHERE gb."eventTaskId"=$1`,
+        [task.id],
+      )
+    ).rows[0];
     const done = batches.filter((b) =>
       ["completed", "completed_with_unresolved"].includes(b.status),
     );
     const sum = (key: string) =>
       done.reduce((n, b) => n + Number(b.summary?.[key] ?? 0), 0);
+    const executions = (
+      await queryable.query(
+        `SELECT ae.metrics
+         FROM governance."AgentExecution" ae
+         JOIN governance."BatchAttempt" ba ON ba.id=ae."batchAttemptId"
+         JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
+         WHERE gb."eventTaskId"=$1`,
+        [task.id],
+      )
+    ).rows;
+    const observability = executions.reduce(
+      (acc, row) => {
+        const metrics = (row.metrics ?? {}) as Record<string, unknown>;
+        acc.llmCalls += Number(metrics.llmCalls ?? 0);
+        acc.networkCalls += Number(metrics.networkCalls ?? 0);
+        acc.ruleDecisions += Number(metrics.ruleDecisions ?? 0);
+        acc.inputTokens += Number(metrics.inputTokens ?? 0);
+        acc.outputTokens += Number(metrics.outputTokens ?? 0);
+        acc.estimatedCostUsd += Number(metrics.estimatedCostUsd ?? 0);
+        if (Number(metrics.llmCalls ?? 0) > 0 && metrics.costKnown !== true) acc.costKnown = false;
+        for (const model of Array.isArray(metrics.llmModels) ? metrics.llmModels : [])
+          if (typeof model === "string" && !acc.llmModels.includes(model)) acc.llmModels.push(model);
+        acc.agentExecutions++;
+        acc.agentDurationMs += Number(metrics.durationMs ?? 0);
+        return acc;
+      },
+      { costKnown: true, llmCalls: 0, networkCalls: 0, ruleDecisions: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, llmModels: [] as string[], agentExecutions: 0, agentDurationMs: 0, modelUsage: new Map<string, { calls: number; inputTokens: number; outputTokens: number }>() },
+    );
+    for (const row of executions) {
+      const metrics = (row.metrics ?? {}) as Record<string, unknown>;
+      for (const call of Array.isArray(metrics.researchCalls) ? metrics.researchCalls : []) {
+        if (!call || typeof call !== "object") continue;
+        const item = call as Record<string, unknown>;
+        if (typeof item.model !== "string") continue;
+        const usage = observability.modelUsage.get(item.model) ?? { calls: 0, inputTokens: 0, outputTokens: 0 };
+        usage.calls++;
+        usage.inputTokens += Number(item.inputTokens ?? 0);
+        usage.outputTokens += Number(item.outputTokens ?? 0);
+        observability.modelUsage.set(item.model, usage);
+      }
+    }
+    const createdAt = taskRow?.createdAt ? new Date(taskRow.createdAt).getTime() : 0;
+    const completedAt = taskRow?.completedAt ? new Date(taskRow.completedAt).getTime() : 0;
     return {
       taskId: task.id,
       mode: task.mode,
@@ -287,6 +367,42 @@ export class EventRunner {
       completedBatches: done.length,
       totalBatches: batches.length,
       unresolvedDetails: findings,
+      observability: {
+        llmCalls: observability.llmCalls,
+        networkCalls: observability.networkCalls,
+        ruleDecisions: observability.ruleDecisions,
+        inputTokens: observability.inputTokens,
+        outputTokens: observability.outputTokens,
+        estimatedCostUsd: observability.costKnown ? observability.estimatedCostUsd : null,
+        costKnown: observability.costKnown,
+        llmModels: observability.llmModels,
+        agentExecutions: observability.agentExecutions,
+        agentDurationMs: observability.agentDurationMs,
+        modelUsage: [...observability.modelUsage.entries()].map(([model, usage]) => ({ model, ...usage })),
+        eventDurationMs: createdAt && completedAt ? completedAt - createdAt : null,
+        queueWaitMs:
+          createdAt && attemptStats?.firstAttemptAt
+            ? Math.max(0, new Date(attemptStats.firstAttemptAt).getTime() - createdAt)
+            : null,
+        attemptCount: Number(attemptStats?.attemptCount ?? 0),
+        retryCount: Number(attemptStats?.retryCount ?? 0),
+        attemptDurationMs: Number(attemptStats?.attemptDurationMs ?? 0),
+        retryDurationMs: Number(attemptStats?.retryDurationMs ?? 0),
+        resolved: findingCounts
+          .filter((f) => f.resolutionStatus === "resolved")
+          .reduce((n, f) => n + Number(f.count), 0),
+        unresolvedFindings: findingCounts
+          .filter((f) => f.resolutionStatus === "unresolved")
+          .reduce((n, f) => n + Number(f.count), 0),
+        costPerImportedRowUsd:
+          sum("importedRows") > 0 && observability.costKnown
+            ? observability.estimatedCostUsd / sum("importedRows")
+            : null,
+        costPerPlannedRowUsd:
+          sum("plannedRows") > 0 && observability.costKnown
+            ? observability.estimatedCostUsd / sum("plannedRows")
+            : null,
+      },
       error,
     };
   }
@@ -298,8 +414,12 @@ export class EventRunner {
           [task.id],
         )
       ).rowCount;
-      const status = unresolved ? "completed_with_unresolved" : "completed",
-        report = await this.summary(task, status, undefined, c);
+      const status = unresolved ? "completed_with_unresolved" : "completed";
+      await c.query(
+        'UPDATE governance."EventImportTask" SET status=$2,"completedAt"=clock_timestamp(),"updatedAt"=clock_timestamp() WHERE id=$1',
+        [task.id, status],
+      );
+      const report = await this.summary(task, status, undefined, c);
       await enqueueReport(
         c,
         { taskId: task.id },
@@ -308,8 +428,8 @@ export class EventRunner {
         report,
       );
       await c.query(
-        'UPDATE governance."EventImportTask" SET status=$2,summary=$3,"completedAt"=clock_timestamp(),"updatedAt"=clock_timestamp(),"leaseToken"=NULL,"leaseUntil"=NULL WHERE id=$1',
-        [task.id, status, report],
+        'UPDATE governance."EventImportTask" SET summary=$2,"leaseToken"=NULL,"leaseUntil"=NULL WHERE id=$1',
+        [task.id, report],
       );
       return report;
     });

@@ -351,6 +351,22 @@ export class GovernanceDB {
         endState: m.endState ?? "unknown",
         exclusivityGroup: m.exclusivityGroup ?? undefined,
       }));
+      // Bounded per candidate, with a truncation sentinel kept visible in context.
+      const historicalResults = (await c.query(`SELECT h.* FROM public."Person" p
+        CROSS JOIN LATERAL (SELECT rr.id,rr."personId",rr."organizationId",o."nameJa" AS "organizationName",
+          rr."raceId",r.slug AS "raceSlug",r.name AS "raceName",r."startsAt" AS "raceDate",
+          rr.mark,rr.notes,rr."isStarter",rr."sourceId"
+          FROM public."RaceResult" rr JOIN public."Race" r ON r.id=rr."raceId"
+          LEFT JOIN public."Organization" o ON o.id=rr."organizationId"
+          WHERE rr."personId"=p.id AND rr."raceId"<>$2
+          ORDER BY r."startsAt" DESC NULLS LAST,rr.id LIMIT 11) h
+        WHERE p.id=ANY($1::text[])`, [people.map(p => p.id), race.id])).rows
+        .map(r => ({ ...r, raceDate: date(r.raceDate) }));
+      const historicalReferences = (await c.query(`SELECT h.* FROM public."Person" p
+        CROSS JOIN LATERAL (SELECT sr.id,sr."personId",sr."sourceId",sr."sourceEntityKey" AS "sourceKey",
+          sr."sourceEntityType" AS "entityType",sr."sourceUrl"
+          FROM public."SourceReference" sr WHERE sr."personId"=p.id
+          ORDER BY sr.id LIMIT 11) h WHERE p.id=ANY($1::text[])`, [people.map(p => p.id)])).rows;
       const orgNames = input.organizations.map((o) => normalizeName(o.name));
       const orgRows = (
         await c.query(
@@ -359,6 +375,7 @@ export class GovernanceDB {
             orgNames,
             [
               ...memberships.map((m) => m.organizationId),
+              ...historicalResults.map(r => r.organizationId).filter(Boolean),
               ...sourceMappings.map((m) => m.organizationId).filter(Boolean),
             ],
             input.organizations.map((o) =>
@@ -390,6 +407,8 @@ export class GovernanceDB {
         memberships,
         pbs,
         sourceMappings,
+        historicalResults,
+        historicalReferences,
       };
     } finally {
       c.release();

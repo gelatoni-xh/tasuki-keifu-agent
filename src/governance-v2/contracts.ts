@@ -224,6 +224,14 @@ export type Context = {
   people: Person[];
   memberships: Membership[];
   pbs: PB[];
+  historicalReferences?: Array<{
+    id: string; personId: string; sourceId: string; sourceKey: string; entityType: string; sourceUrl?: string;
+  }>;
+  historicalResults?: Array<{
+    id: string; personId: string; organizationId?: string; organizationName?: string;
+    raceId: string; raceSlug: string; raceName: string; raceDate?: string;
+    mark?: string; notes?: string; isStarter?: boolean; sourceId?: string;
+  }>;
   sourceMappings: {
     sourceId: string;
     entityType: string;
@@ -302,9 +310,17 @@ export type Metrics = {
   networkCalls: number;
   inputTokens: number;
   outputTokens: number;
+  estimatedCostUsd: number;
+  costKnown?: boolean;
+  llmModels: string[];
   durationMs: number;
   stoppedReasons: string[];
+  accountedCallIds?: string[];
+  normalizationStages?: Array<{ stage: string; inputCount: number; resolvedCount: number; remainingCount: number; durationMs: number }>;
+  normalizationPolicyVersion?: string;
+  normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
   researchCalls?: Array<{
+    callId?: string; stage?: string; itemCount?: number;
     model: string;
     category: string;
     durationMs: number;
@@ -344,6 +360,8 @@ export const emptyMetrics = (): Metrics => ({
   networkCalls: 0,
   inputTokens: 0,
   outputTokens: 0,
+  estimatedCostUsd: 0,
+  llmModels: [],
   durationMs: 0,
   stoppedReasons: [],
 });

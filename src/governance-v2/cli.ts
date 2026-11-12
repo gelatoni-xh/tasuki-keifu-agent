@@ -8,7 +8,11 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { GovernanceDB, createGovernancePool } from "./database.js";
 import { DirectoryPayloadStore } from "./storage.js";
 import { EventRunner } from "./runner.js";
-import { createMailTransport, deliverNotifications, parseMailConfig } from "./notifications.js";
+import {
+  createMailTransport,
+  deliverNotifications,
+  parseMailConfig,
+} from "./notifications.js";
 
 async function main() {
   const [command, arg] = process.argv.slice(2);
@@ -104,7 +108,7 @@ async function main() {
             await new Promise((resolve) => setTimeout(resolve, 5000));
         } while (!stopped);
       } finally {
-        // Transport closes with the worker process.
+        // Nodemailer closes idle connections when the process exits.
       }
       return;
     }
@@ -171,7 +175,11 @@ async function main() {
             25000,
           ),
           maxRequests: positive(process.env.GOVERNANCE_RESEARCH_REQUESTS, 3),
+          inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
+          outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
         },
+        inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
+        outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
       });
       if (command !== "worker") {
         console.log(JSON.stringify(await runner.run(arg), null, 2));
@@ -209,6 +217,10 @@ function positive(value: string | undefined, fallback: number) {
   const v = Number(value);
   if (!Number.isInteger(v) || v <= 0 || v > 100000) return fallback;
   return v;
+}
+function nonNegative(value: string | undefined) {
+  const v = Number(value);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : "governance_failed");

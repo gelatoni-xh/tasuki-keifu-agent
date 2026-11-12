@@ -98,6 +98,8 @@ export async function normalizeOrganizations(
   input: BatchInput,
   ctx: Context,
   research: Researcher,
+  light = false,
+  overrides: Record<string, string> = {},
 ): Promise<Resolution> {
   const started = Date.now(),
     out: Resolution = {
@@ -128,7 +130,7 @@ export async function normalizeOrganizations(
         (org.type === "unknown" || o.type === "unknown" || o.type === org.type),
     );
     let id =
-      mapped ??
+      overrides[org.key] ?? mapped ??
       resolved.get(identity) ??
       (candidates.length === 1 ? candidates[0].id : undefined);
     if (!id && candidates.length === 0) {
@@ -138,7 +140,7 @@ export async function normalizeOrganizations(
             normalizeName(o.nameJa).startsWith(name.slice(0, 2))) &&
           (org.type === "unknown" || o.type === org.type),
       );
-      if (recalled.length && recalled.length <= 8) {
+      if (recalled.length && (light || recalled.length <= 8)) {
         const r = await research(
           {
             kind: "organization_identity",
@@ -257,7 +259,7 @@ export async function normalizeOrganizations(
       );
     out.organizationMap[org.key] = id;
     resolved.set(identity, id);
-    if (!mapped)
+    if (mapped !== id)
       out.changes.push(
         change(
           batchId,
@@ -282,6 +284,8 @@ export async function normalizePeople(
   ctx: Context,
   orgs: Resolution,
   research: Researcher,
+  light = false,
+  forceReview: ReadonlySet<string> = new Set(),
 ): Promise<Resolution> {
   const started = Date.now(),
     out: Resolution = {
@@ -384,11 +388,12 @@ export async function normalizePeople(
       ctx.people.find((p) => p.id === mapped)?.birthDate !== row.birthDate
     )
       id = undefined;
+    if (forceReview.has(row.key)) id = undefined;
     // Research requires an actual competing attribution, not a mere empty field/name variation.
     if (
       !id &&
-      candidates.length &&
-      (contextual.length > 1 ||
+      (candidates.length || forceReview.has(row.key)) &&
+      (light || contextual.length > 1 ||
         !!mapped ||
         (candidates.length === 1 &&
           ctx.memberships.some(
@@ -414,6 +419,8 @@ export async function normalizePeople(
             "来源身份与存量履历存在竞争归属，确认同人或不同人；不要仅凭同名合并。",
           context: {
             row,
+            affiliation: { source: input.organizations.find(o => o.key === row.organizationKey),
+              organizationId: orgId, canonical: ctx.organizations.find(o => o.id === orgId) },
             candidates,
             memberships: ctx.memberships.filter((m) =>
               candidates.some((p) => p.id === m.personId),

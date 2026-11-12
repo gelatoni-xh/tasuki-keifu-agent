@@ -13,7 +13,8 @@ import {
 } from "../database.js";
 import { DirectoryPayloadStore } from "../storage.js";
 import { EventRunner } from "../runner.js";
-import { CONTRACT_VERSION } from "../contracts.js";
+import type { Researcher } from "../research.js";
+import { CONTRACT_VERSION, manifestSchema } from "../contracts.js";
 import { deliverNotifications } from "../notifications.js";
 
 const url = process.env.GOVERNANCE_TEST_DATABASE_URL;
@@ -87,9 +88,48 @@ function manifest(key = "event-1", mode: "apply" | "dry_run" = "apply") {
     })),
   };
 }
-const noResearch = async () => {
-  assert.fail("Deterministic case invoked research");
+// Structured fixture for the new stages; severe-case evidence is supplied only
+// by the existing deep-research fixture below.
+function stagedFixture(deep: Researcher): Researcher {
+  return async (request, metrics) => {
+    if (request.kind === "normalization_cross_check") return { crossAnswer: { issues: [] }, evidence: [] };
+    if (request.kind === "normalization_light" || request.kind === "organization_adjudication") {
+      const items = (request.context as { items: Array<{ itemKey: string }> }).items;
+      return { batchAnswer: { items: items.map(i => ({ itemKey: i.itemKey, verdict: "unresolved", targetId: null, evidenceRefs: [], reason: "需深入研究的竞争归属" })) }, evidence: [] };
+    }
+    return deep(request, metrics);
+  };
+}
+const noResearch: Researcher = async request => {
+  if (request.kind === "normalization_cross_check") return { crossAnswer: { issues: [] }, evidence: [] };
+  assert.fail("Deterministic case invoked identity research");
 };
+test("official DNS is not a starter; DNF and DQ are starters without a valid mark", async () => {
+  const input = manifestSchema.parse(manifest("starter-status"));
+  input.batches = input.batches.slice(0, 1);
+  const row = input.batches[0].rows[0];
+  input.batches[0].rows = [
+    { ...row, key: "dns", name: "欠場太郎", notes: "DNS 欠" },
+    { ...row, key: "dnf", name: "途中太郎", notes: "DNF" },
+    { ...row, key: "dq", name: "失格太郎", notes: "DQ,S5" },
+    { ...row, key: "finish", name: "完走太郎", mark: "15:30.00" },
+  ].map(({ sourceKey, memberships, pbs, grade, ...r }) => ({ ...r, memberships: [], pbs: [] }));
+  const id = await db.submit(input, store);
+  const report = await new EventRunner(db, store, saver, {
+    writeEnabled: true,
+    researcher: noResearch,
+  }).run(id);
+  assert.equal(report?.status, "completed");
+  const results = (await pool.query('SELECT notes,mark,"isStarter","markMillis" FROM public."RaceResult" WHERE "raceId"=\'r1\'')).rows;
+  assert.equal(results.length, 4);
+  assert.equal(results.find(r => r.notes === "DNS 欠").isStarter, false);
+  for (const notes of ["DNF", "DQ,S5"]) {
+    const result = results.find(r => r.notes === notes);
+    assert.equal(result.isStarter, true);
+    assert.equal(result.markMillis, null);
+  }
+  assert.equal(results.find(r => r.mark === "15:30.00").isStarter, true);
+});
 test("two batches atomically import, improve existing high school, preserve better PB, and notify once", async () => {
   const id = await db.submit(manifest(), store);
   assert.equal(await db.submit(manifest(), store), id);
@@ -103,6 +143,15 @@ test("two batches atomically import, improve existing high school, preserve bett
   }).run(id);
   assert.equal(report?.status, "completed");
   assert.equal(report?.importedRows, 2);
+  assert.ok(report?.observability?.eventDurationMs !== null);
+  assert.ok((report?.observability?.eventDurationMs ?? 0) >= 0);
+  assert.ok((report?.observability?.queueWaitMs ?? -1) >= 0);
+  assert.equal(report?.observability?.attemptCount, 2);
+  assert.equal(report?.observability?.retryCount, 0);
+  assert.ok((report?.observability?.attemptDurationMs ?? 0) > 0);
+  assert.equal(report?.observability?.resolved, 0);
+  assert.equal(report?.observability?.unresolvedFindings, 0);
+  assert.deepEqual(report?.observability?.modelUsage, []);
   assert.equal(
     (await pool.query('SELECT count(*)::int AS n FROM public."RaceResult"'))
       .rows[0].n,
@@ -301,10 +350,10 @@ test("identity unresolved still imports all rows and emits a batch alert", async
   let researchCalls = 0;
   const report = await new EventRunner(db, store, saver, {
     writeEnabled: true,
-    researcher: async () => {
+    researcher: stagedFixture(async () => {
       researchCalls++;
-      return { stopReason: "too_little_public_information", evidence: [] };
-    },
+      return { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "资料不足", evidence: [], corrections: [], split: null }, evidence: [] };
+    }),
   }).run(id);
   assert.equal(report?.status, "completed_with_unresolved");
   assert.equal(report?.importedRows, 1);
@@ -405,7 +454,7 @@ test("evidence-backed person merge moves associations and compares PB across bot
   const id = await db.submit(input, store);
   await new EventRunner(db, store, saver, {
     writeEnabled: true,
-    researcher: async (request) =>
+    researcher: stagedFixture(async (request) =>
       request.kind === "person_identity"
         ? {
             answer: {
@@ -421,7 +470,7 @@ test("evidence-backed person merge moves associations and compares PB across bot
             },
             evidence: [{ url: "https://example.org/official" }],
           }
-        : { stopReason: "no_more_sources", evidence: [] },
+        : { stopReason: "no_more_sources", evidence: [] }),
   }).run(id);
   assert.equal(
     (
@@ -464,7 +513,7 @@ test("a mixed-person split moves only evidence-selected associations and imports
   const id = await db.submit(input, store);
   const report = await new EventRunner(db, store, saver, {
     writeEnabled: true,
-    researcher: async () => ({
+    researcher: stagedFixture(async () => ({
       answer: {
         verdict: "split",
         targetId: null,
@@ -481,7 +530,7 @@ test("a mixed-person split moves only evidence-selected associations and imports
         },
       },
       evidence: [{ url: "https://example.org/official" }],
-    }),
+    })),
   }).run(id);
   assert.equal(report?.importedRows, 1);
   const target = (
@@ -542,4 +591,26 @@ test("a stale plan reloads affected context rather than overwriting newer busine
       .rows[0].n,
     2,
   );
+});
+
+test("model journal survives a crash before lightweight checkpoint commit without another physical call", async () => {
+  await pool.query(`INSERT INTO public."Person" (id,slug,"displayNameJa","updatedAt") VALUES('p2','other-athlete','試験太郎',now());
+    DELETE FROM public."SourceReference";`);
+  const input = manifest("journal-recovery", "dry_run"); input.batches = input.batches.slice(0, 1);
+  let lightweightCalls = 0;
+  const research: Researcher = async (request, metrics) => {
+    metrics.llmCalls++;
+    if (request.kind === "normalization_light") { lightweightCalls++; }
+    return stagedFixture(async () => ({ answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立证据不足", evidence: [], corrections: [], split: null }, evidence: [] }))(request, metrics);
+  };
+  const id = await db.submit(input, store);
+  await assert.rejects(new EventRunner(db, store, saver, { writeEnabled: false,
+    researcher: research, maxAttempts: 1, failAfterNode: "person_light_batch" }).run(id), /Injected/);
+  assert.equal(lightweightCalls, 1);
+  await db.retry(id);
+  const report = await new EventRunner(db, store, saver, { writeEnabled: false, researcher: research }).run(id);
+  assert.equal(lightweightCalls, 1);
+  assert.equal(report?.observability?.llmCalls, 3);
+  assert.equal(report?.observability?.estimatedCostUsd, null);
+  assert.equal(report?.importedRows, 0);
 });

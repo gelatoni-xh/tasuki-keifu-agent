@@ -1,0 +1,19 @@
+name: Build reviewable release image
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact release
+        run: |
+          docker build --label org.opencontainers.image.revision=${{ github.sha }} -t tasuki-keifu-agent:normalization-20261112 .
+          docker save tasuki-keifu-agent:normalization-20261112 | gzip > release-image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image
+          path: release-image.tar.gz
+          retention-days: 3

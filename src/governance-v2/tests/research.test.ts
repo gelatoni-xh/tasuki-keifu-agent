@@ -27,6 +27,13 @@ test("research validates citations and structured output and stops at request bu
     const body = JSON.parse(String(init?.body));
     assert.equal(body.store, false);
     assert.equal(body.text.format.type, "json_schema");
+    assert.equal(body.max_output_tokens, undefined);
+    assert.equal(body.max_tool_calls, undefined);
+    const schema = body.text.format.schema;
+    assert.equal(schema.additionalProperties, false);
+    assert.equal(schema.properties.evidence.items.properties.url.type, "string");
+    assert.equal(schema.properties.evidence.items.properties.url.format, undefined);
+    assert.equal(schema.properties.reason.minLength, undefined);
     return new Response(
       JSON.stringify({
         output: [
@@ -51,12 +58,17 @@ test("research validates citations and structured output and stops at request bu
         model: "configured-model",
         timeoutMs: 1000,
         maxRequests: 1,
+        inputCostPerMillionUsd: 1,
+        outputCostPerMillionUsd: 2,
       });
     const result = await research(request, metrics);
     assert.equal(result.answer?.targetId, "p");
     assert.equal(metrics.llmCalls, 1);
     assert.equal(metrics.networkCalls, 1);
     assert.equal(metrics.inputTokens, 100);
+    assert.equal(metrics.outputTokens, 30);
+    assert.deepEqual(metrics.llmModels, ["configured-model"]);
+    assert.equal(metrics.estimatedCostUsd, 0.00016);
     assert.equal(
       (await research(request, metrics)).stopReason,
       "research_budget_exhausted",
@@ -141,4 +153,93 @@ test("missing configuration, oversized questions and exhausted persisted budget 
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("pro Responses stream retains citations and usage across arbitrary chunks", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.stream, true);
+    assert.equal(body.input[0].content[0].type, "input_text");
+    assert.equal(JSON.parse(body.input[0].content[0].text).subjectRef, request.subjectRef);
+    const event = { type: "response.completed", response: { status: "completed",
+      output: [
+        { type: "web_search_call", action: { sources: [{ url: "https://example.org/official" }] } },
+        { type: "message", content: [{ type: "output_text", text: JSON.stringify(answer) }] },
+      ], usage: { input_tokens: 120, output_tokens: 45 } } };
+    const bytes = new TextEncoder().encode(`event: response.completed\r\ndata: ${JSON.stringify(event)}\r\n\r\ndata: [DONE]\r\n\r\n`);
+    return new Response(new ReadableStream({ start(controller) {
+      for (let offset = 0; offset < bytes.length; offset += 7) controller.enqueue(bytes.slice(offset, offset + 7));
+      controller.close();
+    } }), { headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const metrics = emptyMetrics();
+    const result = await createResearcher({ apiKey: "test", model: "gpt-6.1-sol", timeoutMs: 1000, maxRequests: 1 })(request, metrics);
+    assert.equal(result.answer?.targetId, "p");
+    assert.equal(metrics.inputTokens, 120);
+    assert.equal(metrics.outputTokens, 45);
+    assert.equal(metrics.networkCalls, 1);
+    assert.equal(result.evidence.length, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test("partial and failed Responses streams cannot authorize an identity change", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const type of ["response.output_text.delta", "response.failed", "response.incomplete"]) {
+      globalThis.fetch = async () => new Response(
+        `data: ${JSON.stringify({ type, delta: JSON.stringify(answer) })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+      const result = await createResearcher({ apiKey: "test", model: "gpt-6.1-sol", timeoutMs: 1000, maxRequests: 1 })(request, emptyMetrics());
+      assert.equal(result.stopReason, "research_unusable_response");
+      assert.equal(result.answer, undefined);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("provider-compatible schema still enforces local URL, date and reason validation", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const invalid of [
+      { ...answer, reason: "" },
+      { ...answer, evidence: [{ url: "invalid-url", quote: "bad" }] },
+      { ...answer, corrections: [{ membershipId: "m", startDate: "2026-99-99", endDate: null }] },
+    ]) {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(invalid) }] }],
+      }));
+      const result = await createResearcher({ apiKey: "test", model: "gpt-6.1-sol", timeoutMs: 1000, maxRequests: 1 })(request, emptyMetrics());
+      assert.equal(result.answer, undefined);
+      assert.equal(result.stopReason, "research_unusable_response");
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("whole-group schemas disable tools and have a fixed five-call allowance separate from deep research", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    calls++; const body = JSON.parse(String(init?.body));
+    const req = JSON.parse(body.input[0].content[0].text);
+    const cross = req.kind === "normalization_cross_check";
+    if (req.allowNetwork === false) {
+      assert.equal(body.tools, undefined);
+      assert.ok(body.text.format.schema.properties[cross ? "issues" : "items"]);
+    }
+    return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(req.allowNetwork === false ? cross ? { issues: [] } : { items: [] } : { ...answer, verdict: "unresolved", evidence: [] }) }] }], usage: { input_tokens: 20, output_tokens: 5 } }));
+  };
+  try {
+    const metrics = emptyMetrics();
+    const research = createResearcher({ apiKey: "test", model: "configured", maxRequests: 1, timeoutMs: 1000 });
+    for (const kind of ["normalization_light", "normalization_light", "normalization_cross_check", "organization_adjudication", "normalization_light"] as const) {
+      const out = await research({ ...request, kind, allowNetwork: false, context: { items: [], padding: "x".repeat(25000) } }, metrics);
+      assert.ok(out.batchAnswer || out.crossAnswer);
+    }
+    assert.equal((await research({ ...request, kind: "normalization_light", allowNetwork: false }, metrics)).stopReason, "research_budget_exhausted");
+    assert.ok((await research(request, metrics)).answer);
+    assert.equal((await research(request, metrics)).stopReason, "research_budget_exhausted");
+    assert.equal(calls, 6);
+    assert.equal(metrics.costKnown, false);
+  } finally { globalThis.fetch = original; }
 });
