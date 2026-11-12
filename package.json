@@ -21,7 +21,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "governance:event": "tsx src/governance-v2/cli.ts",
-    "test:governance": "node --import tsx --test src/governance-v2/tests/rules.test.ts src/governance-v2/tests/research.test.ts src/governance-v2/tests/normalization.test.ts",
+    "test:governance": "node --import tsx --test src/governance-v2/tests/config.test.ts src/governance-v2/tests/rules.test.ts src/governance-v2/tests/research.test.ts src/governance-v2/tests/normalization.test.ts",
     "test:governance:integration": "node --import tsx --test src/governance-v2/tests/integration.test.ts"
   },
   "dependencies": {
