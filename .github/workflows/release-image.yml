@@ -1,6 +1,8 @@
 name: Build reviewable release image
 on:
   workflow_dispatch:
+  push:
+    branches: [release/normalization-cross-check-20261112]
 permissions:
   contents: read
 jobs:
