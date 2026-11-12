@@ -2,6 +2,7 @@ import "dotenv/config";
 import path from "node:path";
 import { adaptRacePayload } from "./legacy-adapter.js";
 import { manifestSchema } from "./contracts.js";
+import { positiveInteger } from "./config.js";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -51,7 +52,7 @@ async function main() {
       return;
     }
     if (command === "cleanup-checkpoints") {
-      const days = positive(
+      const days = positiveInteger(
         process.env.GOVERNANCE_CHECKPOINT_RETENTION_DAYS,
         7,
       );
@@ -164,17 +165,29 @@ async function main() {
         throw new Error(
           "Apply CLI requires a separate GOVERNANCE_READ_DATABASE_URL",
         );
+      const researchTimeoutMs = positiveInteger(
+        process.env.GOVERNANCE_RESEARCH_TIMEOUT_MS,
+        25000,
+        600000,
+      );
+      const researchRequests = positiveInteger(
+        process.env.GOVERNANCE_RESEARCH_REQUESTS,
+        3,
+      );
+      if (command === "worker")
+        console.info(JSON.stringify({
+          event: "governance_worker_config",
+          researchTimeoutMs,
+          researchRequests,
+        }));
       const runner = new EventRunner(db, store, saver, {
         writeEnabled: process.env.GOVERNANCE_WRITE_ENABLED === "true",
         research: {
           apiKey: process.env.OPENAI_API_KEY,
           baseUrl: process.env.OPENAI_BASE_URL,
           model: process.env.GOVERNANCE_RESEARCH_MODEL,
-          timeoutMs: positive(
-            process.env.GOVERNANCE_RESEARCH_TIMEOUT_MS,
-            25000,
-          ),
-          maxRequests: positive(process.env.GOVERNANCE_RESEARCH_REQUESTS, 3),
+          timeoutMs: researchTimeoutMs,
+          maxRequests: researchRequests,
           inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
           outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
         },
@@ -212,11 +225,6 @@ async function main() {
     if (readPool !== pool) await readPool.end();
     await pool.end();
   }
-}
-function positive(value: string | undefined, fallback: number) {
-  const v = Number(value);
-  if (!Number.isInteger(v) || v <= 0 || v > 100000) return fallback;
-  return v;
 }
 function nonNegative(value: string | undefined) {
   const v = Number(value);
