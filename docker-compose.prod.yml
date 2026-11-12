@@ -29,7 +29,6 @@ services:
     environment:
       NODE_OPTIONS: --max-old-space-size=128
       GOVERNANCE_PAYLOAD_DIR: /var/lib/tasuki-governance/payloads
-      GOVERNANCE_MAIL_ENABLED: "false"
     networks: [tasuki-keifu]
     mem_limit: 160m
     cpus: 0.25
