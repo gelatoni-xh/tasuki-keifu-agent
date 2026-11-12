@@ -33,7 +33,6 @@ services:
     networks: [tasuki-keifu]
     mem_limit: 160m
     cpus: 0.25
-    profiles: [mail]
     restart: unless-stopped
     stop_grace_period: 60s
 

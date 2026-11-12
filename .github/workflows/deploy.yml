@@ -72,7 +72,7 @@ jobs:
               rm -f docker-compose.prod.yml.previous
               exit 1
             fi
-            sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            sudo docker compose --profile mail -f docker-compose.prod.yml up -d --remove-orphans
             healthy=false
             for attempt in $(seq 1 36); do
               if [ "$(sudo docker inspect tasuki-keifu-governance-worker --format '{{.State.Health.Status}}' 2>/dev/null || true)" = healthy ]; then
@@ -85,7 +85,7 @@ jobs:
               sudo docker compose -f docker-compose.prod.yml logs --tail=100 governance-worker || true
               cp docker-compose.prod.yml.previous docker-compose.prod.yml
               sudo docker image tag "$previous_image" tasuki-keifu-agent:latest
-              sudo docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              sudo docker compose --profile mail -f docker-compose.prod.yml up -d --remove-orphans
               exit 1
             fi
             rm -f docker-compose.prod.yml.previous
