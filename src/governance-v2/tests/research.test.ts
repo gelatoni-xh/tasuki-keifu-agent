@@ -103,13 +103,35 @@ test("invented source URLs and invalid JSON cannot produce an executable identit
       "research_has_no_verified_source_reference",
     );
     globalThis.fetch = async () => new Response("not-json");
-    assert.equal(
-      (await research(request, emptyMetrics())).stopReason,
-      "research_unusable_response",
-    );
+    const metrics = emptyMetrics();
+    assert.equal((await research(request, metrics)).stopReason, "research_unusable_response");
+    assert.deepEqual(metrics.researchCalls?.[0]?.diagnostic, {
+      phase: "response_decode",
+      code: "invalid_json",
+      errorName: "SyntaxError",
+    });
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("research records provider request and response identifiers without raw output", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    id: "resp_safe_123",
+    status: "completed",
+    output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(answer) }] }],
+  }), { status: 200, headers: { "x-request-id": "req-safe-123", "content-type": "application/json" } });
+  try {
+    const metrics = emptyMetrics();
+    const result = await createResearcher({ apiKey: "test", model: "configured-model", timeoutMs: 1000, maxRequests: 1 })(request, metrics);
+    assert.equal(result.stopReason, "research_has_no_verified_source_reference");
+    assert.equal(metrics.researchCalls?.[0]?.providerRequestId, "req-safe-123");
+    assert.equal(metrics.researchCalls?.[0]?.responseId, "resp_safe_123");
+    assert.equal(metrics.researchCalls?.[0]?.responseStatus, "completed");
+    assert.equal(metrics.researchCalls?.[0]?.outputTextLength, JSON.stringify(answer).length);
+    assert.equal(JSON.stringify(metrics).includes("学校所属"), false);
+  } finally { globalThis.fetch = original; }
 });
 test("missing configuration, oversized questions and exhausted persisted budget make no model call", async () => {
   const original = globalThis.fetch;

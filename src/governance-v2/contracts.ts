@@ -328,6 +328,20 @@ export type Metrics = {
     inputTokens: number;
     outputTokens: number;
     stoppedReason: string | null;
+    providerRequestId?: string;
+    responseId?: string;
+    responseStatus?: string;
+    outputTypes?: string[];
+    outputTextLength?: number;
+    refusalCount?: number;
+    diagnostic?: {
+      phase: string;
+      code: string;
+      errorName?: string;
+      parserPosition?: number;
+      issueCount?: number;
+      issues?: Array<{ code: string; path: string[] }>;
+    };
   }>;
 };
 export type AgentResult = {

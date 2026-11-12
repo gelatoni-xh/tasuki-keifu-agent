@@ -77,10 +77,50 @@ export type ResearchConfig = {
   reserve?: (kind: ResearchRequest["kind"]) => Promise<boolean>;
 };
 type ResearchResponse = {
+  id?: string;
   status?: string;
   output?: Array<Record<string, unknown>>;
   usage?: { input_tokens?: number; output_tokens?: number };
 };
+
+type Diagnostic = NonNullable<Metrics["researchCalls"]>[number]["diagnostic"];
+class ResearchDiagnosticError extends Error {
+  constructor(readonly diagnostic: NonNullable<Diagnostic>) {
+    super(diagnostic.code);
+  }
+}
+
+function responseIdentifier(value: string | null) {
+  return value && value.length <= 200 && /^[\w./:+-]+$/.test(value) ? value : undefined;
+}
+
+function schemaDiagnostic(error: z.ZodError): NonNullable<Diagnostic> {
+  return {
+    phase: "output_schema",
+    code: "schema_validation_failed",
+    errorName: "ZodError",
+    issueCount: error.issues.length,
+    issues: error.issues.slice(0, 12).map((issue) => ({
+      code: issue.code,
+      path: issue.path.map((part) => String(part).slice(0, 100)),
+    })),
+  };
+}
+
+function errorDiagnostic(error: unknown, phase: string): NonNullable<Diagnostic> {
+  if (error instanceof ResearchDiagnosticError) return error.diagnostic;
+  if (error instanceof z.ZodError) return schemaDiagnostic(error);
+  const name = error instanceof Error ? error.name : "UnknownError";
+  if (error instanceof SyntaxError) {
+    const position = error.message.match(/position\s+(\d+)/i)?.[1];
+    return { phase, code: "invalid_json", errorName: "SyntaxError", ...(position ? { parserPosition: Number(position) } : {}) };
+  }
+  const causeCode = error && typeof error === "object" && "cause" in error && error.cause && typeof error.cause === "object" && "code" in error.cause
+    ? error.cause.code
+    : undefined;
+  const safeCauseCode = typeof causeCode === "string" && /^[A-Z0-9_]{2,40}$/.test(causeCode) ? causeCode : undefined;
+  return { phase, code: safeCauseCode ?? (name === "AbortError" || name === "TimeoutError" ? "request_timeout" : "unexpected_error"), errorName: name.slice(0, 80) };
+}
 
 async function readResearchResponse(response: Response): Promise<ResearchResponse> {
   if (!response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -97,9 +137,15 @@ async function readResearchResponse(response: Response): Promise<ResearchRespons
     const data = frame.split("\n").filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trimStart()).join("\n");
     if (!data || data === "[DONE]") return;
-    const event = JSON.parse(data) as { type?: string; response?: ResearchResponse };
+    let event: { type?: string; response?: ResearchResponse; error?: { code?: string } };
+    try {
+      event = JSON.parse(data) as typeof event;
+    } catch (error) {
+      throw new ResearchDiagnosticError(errorDiagnostic(error, "response_stream"));
+    }
     if (["error", "response.failed", "response.incomplete"].includes(event.type ?? "")) {
-      throw new Error("Research response did not complete");
+      const code = event.type === "response.incomplete" ? "stream_incomplete" : event.type === "response.failed" ? "stream_response_failed" : "stream_error";
+      throw new ResearchDiagnosticError({ phase: "response_stream", code });
     }
     if (event.type === "response.completed") completed = event.response;
   };
@@ -120,7 +166,7 @@ async function readResearchResponse(response: Response): Promise<ResearchRespons
     buffer += decoder.decode();
     if (buffer.trim()) consume(buffer);
     if (!completed || (completed.status && completed.status !== "completed")) {
-      throw new Error("Research stream ended without completion");
+      throw new ResearchDiagnosticError({ phase: "response_stream", code: "stream_missing_completion" });
     }
     return completed;
   } finally {
@@ -147,6 +193,14 @@ export function createResearcher(config: ResearchConfig): Researcher {
       beforeInput = metrics.inputTokens,
       beforeOutput = metrics.outputTokens;
     metrics.llmCalls++;
+    let phase = "request";
+    let providerRequestId: string | undefined;
+    let responseId: string | undefined;
+    let responseStatus: string | undefined;
+    let outputTypes: string[] = [];
+    let outputTextLength = 0;
+    let refusalCount = 0;
+    let diagnostic: Diagnostic;
     const previouslyKnown = metrics.costKnown !== false;
     metrics.costKnown = false;
     try {
@@ -190,9 +244,18 @@ export function createResearcher(config: ResearchConfig): Researcher {
           }),
         },
       );
-      if (!response.ok)
+      providerRequestId = ["x-request-id", "openai-request-id", "request-id"]
+        .map((header) => responseIdentifier(response.headers.get(header)))
+        .find((value): value is string => value !== undefined);
+      responseStatus = String(response.status);
+      if (!response.ok) {
+        diagnostic = { phase: "http", code: `http_${response.status}` };
         return stop(`research_http_${response.status}`, metrics);
+      }
+      phase = "response_decode";
       const data = await readResearchResponse(response);
+      responseId = responseIdentifier(data.id ?? null);
+      responseStatus = data.status ?? responseStatus;
       metrics.costKnown = previouslyKnown && config.inputCostPerMillionUsd !== undefined && config.outputCostPerMillionUsd !== undefined &&
         data.usage?.input_tokens !== undefined && data.usage?.output_tokens !== undefined;
       metrics.inputTokens += data.usage?.input_tokens ?? 0;
@@ -216,16 +279,34 @@ export function createResearcher(config: ResearchConfig): Researcher {
               annotations?: Array<{ url?: string }>;
             }>) ?? [],
         );
+      outputTypes = (data.output ?? []).map((item) => typeof item.type === "string" ? item.type.slice(0, 80) : "unknown").slice(0, 20);
       const raw = content
         .filter((c) => c.type === "output_text")
         .map((c) => c.text ?? "")
         .join("");
+      outputTextLength = raw.length;
+      refusalCount = content.filter((c) => c.type === "refusal").length;
+      phase = "output_json";
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        diagnostic = errorDiagnostic(error, phase);
+        return stop("research_unusable_response", metrics);
+      }
       // Batch answers are validated against per-item scopes by the graph before use.
-      if (request.kind === "normalization_cross_check")
-        return { crossAnswer: crossAnswerSchema.parse(JSON.parse(raw)), evidence: request.providedEvidence ?? [] };
-      if (request.kind === "normalization_light" || request.kind === "organization_adjudication")
-        return { batchAnswer: batchAnswerSchema.parse(JSON.parse(raw)), evidence: request.providedEvidence ?? [] };
-      const answer = researchAnswerSchema.parse(JSON.parse(raw));
+      phase = "output_schema";
+      if (request.kind === "normalization_cross_check") {
+        try { return { crossAnswer: crossAnswerSchema.parse(parsed), evidence: request.providedEvidence ?? [] }; }
+        catch (error) { diagnostic = errorDiagnostic(error, phase); return stop("research_unusable_response", metrics); }
+      }
+      if (request.kind === "normalization_light" || request.kind === "organization_adjudication") {
+        try { return { batchAnswer: batchAnswerSchema.parse(parsed), evidence: request.providedEvidence ?? [] }; }
+        catch (error) { diagnostic = errorDiagnostic(error, phase); return stop("research_unusable_response", metrics); }
+      }
+      let answer: ResearchAnswer;
+      try { answer = researchAnswerSchema.parse(parsed); }
+      catch (error) { diagnostic = errorDiagnostic(error, phase); return stop("research_unusable_response", metrics); }
       const allowedUrls = new Set<string>();
       function collect(v: unknown): void {
         if (!v || typeof v !== "object") return;
@@ -258,22 +339,31 @@ export function createResearcher(config: ResearchConfig): Researcher {
         return stop("research_returned_unknown_duplicate", metrics);
       return { answer, evidence };
     } catch (error) {
-      // Do not persist API response text or bearer credentials in findings.
+      diagnostic = errorDiagnostic(error, phase);
       return stop(
-        error instanceof Error && /timeout|abort/i.test(error.name)
+        diagnostic.code === "request_timeout" || error instanceof Error && /timeout|abort/i.test(error.name)
           ? "research_timeout"
           : "research_unusable_response",
         metrics,
       );
     } finally {
-      (metrics.researchCalls ??= []).push({
+      const call = {
         model: config.model,
         category: request.kind,
         durationMs: Date.now() - started,
         inputTokens: metrics.inputTokens - beforeInput,
         outputTokens: metrics.outputTokens - beforeOutput,
         stoppedReason: metrics.stoppedReasons.length > beforeStops ? metrics.stoppedReasons.at(-1)! : null,
-      });
+        ...(providerRequestId ? { providerRequestId } : {}),
+        ...(responseId ? { responseId } : {}),
+        ...(responseStatus ? { responseStatus } : {}),
+        ...(outputTypes.length ? { outputTypes } : {}),
+        ...(outputTextLength ? { outputTextLength } : {}),
+        ...(refusalCount ? { refusalCount } : {}),
+        ...(diagnostic ? { diagnostic } : {}),
+      };
+      (metrics.researchCalls ??= []).push(call);
+      console.info(JSON.stringify({ event: "governance_research_call", ...call }));
     }
   };
 }
