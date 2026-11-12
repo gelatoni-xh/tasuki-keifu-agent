@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
+import { createTransport } from "nodemailer";
 import type { Finding } from "./contracts.js";
 
 export type Report = {
@@ -88,6 +89,41 @@ export type MailTransport = (message: {
   text: string;
   messageId: string;
 }) => Promise<void>;
+
+export type MailConfig =
+  | { provider: "smtp"; host: string; port?: number; username: string; password: string; from: string; to: string }
+  | { provider: "resend"; api_key: string; from: string; to: string };
+
+export function parseMailConfig(raw = process.env.MAIL_CONFIG): MailConfig {
+  if (!raw) throw new Error("MAIL_CONFIG is required when mail is enabled");
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error("MAIL_CONFIG must be valid JSON"); }
+  if (!value || typeof value !== "object") throw new Error("MAIL_CONFIG must be a JSON object");
+  const config = value as Record<string, unknown>;
+  if (config.provider === "smtp") {
+    if (!["host", "username", "password", "from", "to"].every((key) => typeof config[key] === "string"))
+      throw new Error("SMTP MAIL_CONFIG requires host, username, password, from and to");
+    const port = config.port === undefined ? 465 : Number(config.port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error("SMTP MAIL_CONFIG port must be valid");
+    return { provider: "smtp", host: config.host as string, port, username: config.username as string, password: config.password as string, from: config.from as string, to: config.to as string };
+  }
+  if (config.provider === "resend" && typeof config.api_key === "string" && typeof config.from === "string" && typeof config.to === "string")
+    return { provider: "resend", api_key: config.api_key, from: config.from, to: config.to };
+  throw new Error("MAIL_CONFIG provider must be smtp or resend with required fields");
+}
+
+export function createMailTransport(config: MailConfig): MailTransport {
+  if (config.provider === "smtp") {
+    const smtp = createTransport({ host: config.host, port: config.port ?? 465, secure: (config.port ?? 465) === 465, connectionTimeout: 15000, socketTimeout: 25000, auth: { user: config.username, pass: config.password } });
+    return async ({ subject, text, messageId }) => { await smtp.sendMail({ from: config.from, to: config.to, subject, text, messageId }); };
+  }
+  return async ({ subject, text, messageId }) => {
+    const response = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${config.api_key}`, "Content-Type": "application/json", "User-Agent": "tasuki-keifu-governance/1.0" }, body: JSON.stringify({ from: config.from, to: [config.to], subject, text, headers: { "Message-ID": messageId } }) });
+    if (!response.ok) throw new Error(`Mail provider rejected email (${response.status})`);
+    const result = (await response.json()) as { id?: unknown };
+    if (typeof result.id !== "string" || !result.id) throw new Error("Mail provider did not return a message ID");
+  };
+}
 export async function deliverNotifications(
   pool: Pool,
   transport: MailTransport,
