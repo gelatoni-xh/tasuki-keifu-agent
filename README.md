@@ -1,84 +1,67 @@
 # tasuki-keifu-agent
 
-## New event governance
-
-The current governance service is event and batch driven. It uses the main Tasuki database and replaces the previous web Agent process when deployed; the old Agent database is left untouched and is not migrated into governance records. See [`docs/governance-v2.md`](docs/governance-v2.md) for the runtime model, production environment file, migration order, and rollback behavior. The worker starts with business writes and mail disabled; enable them only for an explicitly reviewed pilot.
-
 [![中文](https://img.shields.io/badge/阅读中文-README.md-1677ff?style=flat-square)](README.md) [![English](https://img.shields.io/badge/Read%20English-README.en.md-555?style=flat-square)](README.en.md) [![日本語](https://img.shields.io/badge/日本語で読む-README.ja.md-555?style=flat-square)](README.ja.md)
 
-基于 LangGraph 的内部数据诊断 Agent，用于 `tasuki-keifu`。
+`tasuki-keifu-agent` 是 `tasuki-keifu` 的内部数据治理服务。当前主流程以赛事和区/组为单位运行：先导入已存在的赛事数据，再逐批治理选手、组织、Membership、成绩与 PB。生产入口是 `src/governance-v2/cli.ts` 的 event governance runner；旧的个人诊断和批处理 CLI 仍保留作兼容用途，不是新赛事导入流程。
 
-V1 范围：
+## 治理流程
 
-- 选手诊断图（`person diagnosis graph`）
-- 只读访问主业务数据库 `tasuki_keifu`
-- 将运行数据写入独立的 `tasuki_keifu_agent` 数据库
-- 输出结构化发现和建议的人工操作
-- 提供治理批处理，每位选手的操作包均有审计记录
-- 通过标准 `LANGCHAIN_*` 环境变量接入 LangSmith 追踪
-- 可选使用 GPT-5.4 对存在歧义的姓名归一化候选进行身份研究
-- 直接调用 Wikipedia MediaWiki API 核对档案，支持标准 HTTP 代理设置和 macOS 系统代理
+1. 赛事、赛事届次、Race 和 Source 必须先在主站业务库中建立。本服务不会创建赛事壳或调用旧赛事导入写入函数。
+2. 每个任务包含一个或多个显式批次。每个批次指定 `unitType`（`leg`、`heat` 或 `group`）、`unitKey`、`sequence`、`raceSlug` 和来源数据。
+3. 规则先处理可解释的标准化与确定性匹配。剩余身份疑难进入整批轻量归一化，再进入有预算限制的研究；交叉校验检查组织与选手判断是否相互矛盾。若独立组织证据修正了组织映射，只对受影响选手重评一次，不形成循环。
+4. 每批在赛事任务内按顺序运行。严重 unresolved 会保留在治理记录并触发告警，不会自动改写为确定身份；普通 unresolved 不阻断有效行处理。
+5. `dry_run` 生成计划和报告，不写业务表。确认计划后，使用新的 `requestKey` 提交 `apply` 任务；apply 通过独立的只读/写入数据库连接和受控事务执行。
 
-## 本地配置
+完整字段、输入契约、恢复行为、部署要求和回退说明见 [`docs/governance-v2.md`](docs/governance-v2.md)。
+
+## 观测与通知
+
+任务、批次、Agent 执行、模型调用、治理变更和 unresolved 证据记录在主站数据库的 `governance` schema。观测数据包括队列等待、运行和重试耗时，模型/调用次数、输入与输出 tokens、网络查询、估算成本，以及 resolved/unresolved 和计划变更结果。费用仅在配置模型价格时可估算。
+
+邮件由独立 worker 从持久通知队列发送。赛事总结主题带赛事名；告警主题带赛事名和区/组标识。发送失败会重试，稳定 Message-ID 用于识别重复通知。
+
+## 本地开发
 
 ```bash
 pnpm install
-pnpm prisma:generate
-cp .env.example .env
+pnpm typecheck
+pnpm test:governance
+GOVERNANCE_MAIN_REPO=/path/to/tasuki-keifu bash scripts/test-governance-integration.sh
 ```
 
-设置以下环境变量：
+集成脚本会启动一次性本机 PostgreSQL、应用主站完整迁移，再运行集成测试；不会连接生产数据库。需要本机安装 PostgreSQL 工具（`initdb`、`pg_ctl`、`createdb`）。
 
-- `TASUKI_KEIFU_BUSINESS_DATABASE_URL`
-- `TASUKI_KEIFU_BUSINESS_WRITE_DATABASE_URL`：仅在启用业务写入时设置
-- `TASUKI_KEIFU_AGENT_DATABASE_URL`
-- `LANGSMITH_API_KEY`
-- `LANGSMITH_WORKSPACE_ID`
-- `LANGSMITH_TRACING=true`
-- `LANGSMITH_PROJECT=tasuki-keifu-agent-v1`
-- 可选 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`；省略时使用本地 Codex 配置
-- 可选 `HTTPS_PROXY` 或 `HTTP_PROXY`，用于 Wikipedia API；macOS 下未设置时会回退到系统代理
+运行治理 CLI 前，设置：
 
-## 运行
+- `GOVERNANCE_DATABASE_URL`：主站业务数据库中含 `governance` schema 的 runtime 连接。
+- `GOVERNANCE_READ_DATABASE_URL`：只读连接；apply 模式必须配置独立连接。
+- `GOVERNANCE_PAYLOAD_DIR`：持久化原始批次 payload 的绝对路径。
+- `GOVERNANCE_WRITE_ENABLED`：默认关闭；仅在已审核计划后启用 apply 写入。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`GOVERNANCE_RESEARCH_MODEL`：可选的显式研究模型配置。未配置时规则流程仍可执行，需研究的严重疑难会保持 unresolved。
+- `GOVERNANCE_RESEARCH_REQUESTS`、`GOVERNANCE_RESEARCH_TIMEOUT_MS`：单批研究请求预算和超时。
+- `GOVERNANCE_MAIL_ENABLED`、`MAIL_CONFIG`：邮件 worker 的显式开关与 SMTP/Resend 配置。
+
+真实环境配置请参考 [`deploy/governance-v2.env.example`](deploy/governance-v2.env.example)。不要提交凭据或复制生产连接字符串到开发环境。
+
+## 赛事任务命令
 
 ```bash
-pnpm diagnose -- --person-slug example-person
-pnpm diagnose -- --person-id cmxxxx
-pnpm diagnose -- --person-name "選手名"
-npm run inspect -- --limit 5
-npm run inspect -- --person-slug example-person
+node --import tsx src/governance-v2/cli.ts adapt eventspec.json > manifest.json
+node --import tsx src/governance-v2/cli.ts submit manifest.json
+node --import tsx src/governance-v2/cli.ts run TASK_UUID
+node --import tsx src/governance-v2/cli.ts status TASK_UUID
+node --import tsx src/governance-v2/cli.ts worker
+node --import tsx src/governance-v2/cli.ts retry TASK_UUID
 ```
 
-## 冒烟检查
+`adapt` 将既有 `RaceImportPayload` 转成受校验的 manifest，不执行写入。先用 `dry_run` 检查计划和报告。只有在计划经过审核、数据库和写入开关已正确配置后，才提交 `apply`。失败任务必须先检查原因，再显式 `retry`；同一个赛事任务中的后续批次会在前序批次失败时停止。
+
+邮件服务运维命令：
 
 ```bash
-npm run smoke:diagnosis
-npm run smoke:tools
-npm run smoke:nodes
+node --import tsx src/governance-v2/cli.ts health
+node --import tsx src/governance-v2/cli.ts deliver
+node --import tsx src/governance-v2/cli.ts mail-worker
 ```
 
-当前覆盖：
-
-- `smoke:diagnosis`：使用真实样例验证诊断图的端到端输出
-- `smoke:tools`：直接检查核心诊断工具的发现结果
-- `smoke:nodes`：回归关键解析分支的图节点路径，包括真实歧义姓名经由 `research_name_identity` 的处理路径
-- `inspect`：查看近期 Agent 运行与诊断结果
-
-当前版本会在 Agent 数据库中记录诊断结果、操作包、风险挂起与批处理审计数据。已注册的业务写入操作仅在满足下述显式写入保护条件时可用。
-
-## 治理批处理
-
-```bash
-npm run governance:batch -- --limit 20
-npm run governance:batch -- --limit 20 --execute
-```
-
-批处理会比较 `Person` / `Membership` / `PersonalBest` 的最新更新时间与该选手最近一次已结束的治理运行。因风险而挂起的结果也视为已结束，避免对没有变化的案例反复执行。
-
-- 默认使用试运行（dry-run）模式。
-- 即使传入 `--execute`，也只有同时设置 `TASUKI_AGENT_WRITE_ENABLED=true` 和 `TASUKI_KEIFU_BUSINESS_WRITE_DATABASE_URL` 才会执行业务写入。
-- `merge_person_duplicate`：合并一对由 LLM 确认、归一化姓名相同且具有明确非临时规范 slug 的选手。执行器在同一事务中锁定双方、迁移关联记录、保留姓名变体、清理关系缓存、写入业务 `AuditLog`，最后删除重复记录。
-- `backfill_profile_from_wikipedia`：仅从精确匹配的 Wikipedia 页面补齐缺失档案字段。
-- `upsert_personal_bests_from_wikipedia`：写入 Wikipedia 明确列出的 PB；同一项目已有多条记录时，保留既有的分阶段 PB。
-- `mark_memberships_conflicting` 和 `mark_personal_bests_conflicting`：将内部不一致的记录标记为 `conflicting`，不删除记录，也不猜测替代事实。
-- 高风险选手会被挂起，不影响批次中的其他选手。
+部署顺序、checkpoint 初始化、数据库权限、Compose 资源限制与回退流程见治理运行手册。生产任务应由赛事负责人逐组安排和观测；不要把本地 CLI 或 README 示例当作授权去运行真实赛事。
