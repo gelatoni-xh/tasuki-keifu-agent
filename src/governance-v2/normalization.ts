@@ -5,7 +5,7 @@ import type { Researcher, ResearchOutcome, ResearchRequest } from "./research.js
 import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/1";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/2";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
@@ -61,7 +61,7 @@ function stage(metrics: Metrics, name: string, inputCount: number, resolvedCount
   metrics.durationMs += Date.now() - started;
   (metrics.normalizationStages ??= []).push({ stage: name, inputCount, resolvedCount, remainingCount: Math.max(0, inputCount - resolvedCount), durationMs: Date.now() - started });
 }
-function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx: Context) {
+function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx: Context, metrics?: Metrics) {
   if (!outcome.batchAnswer) {
     if (["research_budget_exhausted", "research_not_configured"].includes(outcome.stopReason ?? "")) return [];
     throw new Error(`Normalization model failure: ${outcome.stopReason ?? "missing_batch_answer"}`);
@@ -71,6 +71,17 @@ function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx
   const seen = new Set<string>();
   for (const item of answer.items) {
     const scope = scopes.find(s => s.itemKey === item.itemKey);
+    if (item.verdict !== "match" && item.targetId !== null) {
+      if (metrics) {
+        metrics.normalizationWarnings ??= [];
+        metrics.normalizationWarnings.push({
+          itemKey: item.itemKey,
+          code: "ignored_target_for_non_match",
+          ignoredTargetId: item.targetId,
+        });
+      }
+      item.targetId = null;
+    }
     if (!scope || seen.has(item.itemKey) ||
       (item.verdict === "match" ? !item.targetId || !scope.allowedIds.includes(item.targetId) : item.targetId !== null) ||
       item.evidenceRefs.some(ref => !scope.evidence.some(e => e.key === ref)) ||
@@ -116,7 +127,7 @@ export async function lightBatch(domain: "organization" | "person", state: Norma
       question: "整组全量 unresolved，一次逐项判断。仅基于证据匹配普通变体/身份；同名或同所属本身不足以确认同人；不同出生日期不可match；不合并拆分。",
       context: { items: itemsFor(requests, ctx) }, allowedIds: [], allowNetwork: false,
     }, metrics);
-    const items = requireBatch(outcome, requests, ctx);
+    const items = requireBatch(outcome, requests, ctx, metrics);
     saveItems(next, requests, items);
     stage(metrics, `${domain}_light_batch`, requests.length, items.filter(i => i.verdict !== "unresolved").length, started);
   } else stage(metrics, `${domain}_light_batch`, 0, 0, started);
@@ -192,7 +203,7 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
       question: "一次组织补充裁决。仅根据组织名称及独立来源确认普通变体；不能使用选手同人判断作为组织相同的证据；不足则unresolved。",
       context: { items: itemsFor(requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] }) }, allowedIds: [], allowNetwork: false,
     }, resolution.metrics);
-    const items = requireBatch(outcome, requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] });
+    const items = requireBatch(outcome, requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] }, resolution.metrics);
     saveItems(next, requests, items);
     for (const item of items) {
       const r = requests.find(r => keyOf(r) === item.itemKey)!;
@@ -218,7 +229,7 @@ export async function reassess(input: BatchInput, ctx: Context, state: Normaliza
       question: "组织已由独立证据修正，只重评受影响选手一次；仍不能仅同名同所属确认同人。",
       context: { items: itemsFor(requests, ctx), organizationMap: resolution.organizationMap }, allowedIds: [], allowNetwork: false,
     }, resolution.metrics);
-    const items = requireBatch(outcome, requests, ctx);
+    const items = requireBatch(outcome, requests, ctx, resolution.metrics);
     saveItems(next, requests, items);
     stage(resolution.metrics, "affected_person_reassessment", requests.length, items.filter(i => i.verdict !== "unresolved").length, started);
   } else stage(resolution.metrics, "affected_person_reassessment", 0, 0, started);

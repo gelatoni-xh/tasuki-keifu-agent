@@ -319,6 +319,7 @@ export type Metrics = {
   normalizationStages?: Array<{ stage: string; inputCount: number; resolvedCount: number; remainingCount: number; durationMs: number }>;
   normalizationPolicyVersion?: string;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
+  normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string }>;
   researchCalls?: Array<{
     callId?: string; stage?: string; itemCount?: number;
     model: string;

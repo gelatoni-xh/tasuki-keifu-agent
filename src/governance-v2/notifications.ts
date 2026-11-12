@@ -52,7 +52,7 @@ export type Report = {
 };
 export function reportText(report: Report) {
   return [
-    `赛事治理 ${report.status}（${report.mode}）`,
+    `${(report as Report & { eventName?: string }).eventName ?? "赛事"}治理 ${report.status}（${report.mode}）`,
     `任务：${report.taskId}`,
     `批次：${report.completedBatches}/${report.totalBatches}`,
     `导入 ${report.importedRows} 条；计划 ${report.plannedRows} 条；修复 ${report.repairs ?? 0} 项；计划修复 ${report.plannedRepairs ?? 0} 项；unresolved ${report.unresolved} 项。`,
@@ -70,6 +70,8 @@ export function reportText(report: Report) {
   ].join("\n");
 }
 export function batchReportText(payload: {
+  eventName?: string;
+  batchLabel?: string;
   taskId?: string;
   batchId?: string;
   mode?: string;
@@ -79,7 +81,7 @@ export function batchReportText(payload: {
 }) {
   const s = payload.summary;
   return [
-    "批次治理需要关注",
+    `${payload.eventName ?? "赛事"} ${payload.batchLabel ?? "批次"}治理需要关注`,
     `任务：${payload.taskId ?? "未知"}；批次：${payload.batchId ?? "见站点任务记录"}`,
     ...(s
       ? [
@@ -104,6 +106,24 @@ export async function enqueueReport(
   key: string,
   payload: unknown,
 ) {
+  const details = (await c.query(
+    `SELECT e."officialName", b."unitType", b."unitKey"
+       FROM governance."EventImportTask" t
+       LEFT JOIN public."CompetitionEdition" e ON e.id=t."inputManifest"->>'eventEditionId'
+       LEFT JOIN governance."GovernanceBatch" b ON b.id=$2
+      WHERE t.id=$1`,
+    [owner.taskId ?? (owner.batchId ? (await c.query('SELECT "eventTaskId" FROM governance."GovernanceBatch" WHERE id=$1', [owner.batchId])).rows[0]?.eventTaskId : null), owner.batchId ?? null],
+  )).rows[0];
+  const eventName = details?.officialName ?? "赛事";
+  const unitNumber = typeof details?.unitKey === "string"
+    ? details.unitKey.match(/(\d+)$/)?.[1]
+    : undefined;
+  const batchLabel = unitNumber
+    ? `第${unitNumber}${details.unitType === "leg" ? "区" : "组"}`
+    : undefined;
+  const enrichedPayload = payload && typeof payload === "object"
+    ? { ...(payload as Record<string, unknown>), ...(kind === "event_summary" ? { eventName } : { eventName, batchLabel }) }
+    : payload;
   await c.query(
     'INSERT INTO governance."NotificationDelivery" (id,"eventTaskId","batchId",kind,"dedupeKey",payload) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT("dedupeKey") DO NOTHING',
     [
@@ -112,7 +132,7 @@ export async function enqueueReport(
       owner.batchId ?? null,
       kind,
       key,
-      payload,
+      enrichedPayload,
     ],
   );
 }
@@ -255,10 +275,26 @@ export async function deliverNotifications(
     ).rows[0];
     if (!row) break;
     try {
-      const p = row.payload;
+      const payload = row.payload as Record<string, unknown>;
+      const identity = (await pool.query(
+        `SELECT e."officialName", b."unitType", b."unitKey"
+           FROM governance."EventImportTask" t
+           LEFT JOIN public."CompetitionEdition" e ON e.id=t."inputManifest"->>'eventEditionId'
+           LEFT JOIN governance."GovernanceBatch" b ON b.id=$2
+          WHERE t.id=COALESCE($1,(SELECT "eventTaskId" FROM governance."GovernanceBatch" WHERE id=$2))`,
+        [row.eventTaskId ?? payload.taskId ?? null, row.batchId ?? null],
+      )).rows[0];
+      const number = typeof identity?.unitKey === "string" ? identity.unitKey.match(/(\d+)$/)?.[1] : undefined;
+      const p: Record<string, unknown> = {
+        ...payload,
+        eventName: typeof payload.eventName === "string" ? payload.eventName : identity?.officialName ?? undefined,
+        batchLabel: typeof payload.batchLabel === "string" ? payload.batchLabel : number ? `第${number}${identity.unitType === "leg" ? "区" : "组"}` : undefined,
+      };
       await transport({
-        subject: `[襷の系譜] ${row.kind === "event_summary" ? "赛事治理总结" : "批次治理告警"}`,
-        text: row.kind === "event_summary" ? reportText(p) : batchReportText(p),
+        subject: row.kind === "event_summary"
+          ? `[襷の系譜] ${safeSubject(p.eventName)}赛事治理总结`
+          : `[襷の系譜] ${safeSubject(p.eventName)}${safeSubject(p.batchLabel)}治理告警`,
+        text: row.kind === "event_summary" ? reportText(p as unknown as Report) : batchReportText(p as Parameters<typeof batchReportText>[0]),
         messageId: `<governance-${row.id}@tasuki-keifu>`,
       });
       await pool.query(
@@ -274,4 +310,8 @@ export async function deliverNotifications(
     }
   }
   return sent;
+}
+
+function safeSubject(value: unknown) {
+  return typeof value === "string" ? value.replace(/[\r\n]+/g, " ").slice(0, 80) : "赛事 ";
 }

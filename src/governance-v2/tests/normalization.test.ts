@@ -49,6 +49,17 @@ test("missing, duplicate, foreign target and fabricated evidence cannot authoriz
     await assert.rejects(buildBatchGraph({ loadContext: async () => context(), research }).invoke({ batchId: "b", input: input(), mode: "dry_run" }), /normalization batch/i);
   }
 });
+test("unresolved batch items ignore stray target ids without losing the original response", async () => {
+  const original = { itemKey: "organization_identity:o", verdict: "unresolved" as const, targetId: "o1", evidenceRefs: ["source:o"], reason: "证据不足" };
+  const research: Researcher = async r => r.kind === "normalization_cross_check"
+    ? { crossAnswer: { issues: [] }, evidence: [] }
+    : { batchAnswer: { items: items(r).map(i => ({ ...original, itemKey: i.itemKey, evidenceRefs: i.evidence.map(e => e.key) })) }, evidence: [] };
+  const result = await buildBatchGraph({ loadContext: async () => context(), research }).invoke({ batchId: "b", input: input(), mode: "dry_run" });
+  assert.ok(Object.values(result.normalization.decisions).every(d => d.answer?.verdict === "unresolved" && d.answer.targetId === null));
+  assert.equal(result.resolution.metrics.normalizationWarnings?.length, 2);
+  assert.equal(result.resolution.metrics.normalizationWarnings?.[0]?.code, "ignored_target_for_non_match");
+  assert.equal(original.targetId, "o1");
+});
 test("independent org adjudication triggers one affected-only reassessment and no graph loop", async () => {
   const data = input(), ctx = context();
   data.organizations.push({ key: "other", name: "別高校", type: "high_school" });

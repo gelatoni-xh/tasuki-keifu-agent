@@ -15,7 +15,7 @@ import { DirectoryPayloadStore } from "../storage.js";
 import { EventRunner } from "../runner.js";
 import type { Researcher } from "../research.js";
 import { CONTRACT_VERSION, manifestSchema } from "../contracts.js";
-import { deliverNotifications } from "../notifications.js";
+import { deliverNotifications, enqueueReport } from "../notifications.js";
 
 const url = process.env.GOVERNANCE_TEST_DATABASE_URL;
 if (!url)
@@ -185,14 +185,22 @@ test("two batches atomically import, improve existing high school, preserve bett
     null,
   );
   let mails = 0;
+  const subjects: string[] = [];
   await deliverNotifications(pool, async (m) => {
     mails++;
+    subjects.push(m.subject);
     assert.match(m.text, /导入 2 条/);
   });
   await deliverNotifications(pool, async () => {
     mails++;
   });
   assert.equal(mails, 1);
+  assert.match(subjects[0], /試験駅伝2024赛事治理总结/);
+  const batchId = (await pool.query('SELECT id FROM governance."GovernanceBatch" ORDER BY sequence LIMIT 1')).rows[0].id;
+  await enqueueReport(pool, { batchId }, "batch_alert", "subject-test", { taskId: id, reason: "test" });
+  let alertSubject = "";
+  assert.equal(await deliverNotifications(pool, async m => { alertSubject = m.subject; }), 1);
+  assert.match(alertSubject, /試験駅伝2024第1区治理告警/);
 });
 test("dry-run stores plans and summary but writes no business rows", async () => {
   const id = await db.submit(manifest("dry", "dry_run"), store);
