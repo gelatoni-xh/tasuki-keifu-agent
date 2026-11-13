@@ -145,3 +145,9 @@ DAG 顺序为：组织规则 → 组织整组轻量 → 选手规则 → 选手�
 只接受 match / distinct / unresolved；match 限于候选 ID。确认结论必须包含实际 web_search_call 和响应中可追溯 URL、非空引文；不能自动合并、拆分或推断履历。工具返回 URL 只能验证来源可追溯，不保证引文事实正确。模型未执行搜索或没有可引用来源时保留 unresolved，API/响应故障仍作为阻碍项。
 
 organizationResearch 逐对象记录候选数、进入原因及结果，normalizationStages 记录核验人数与解决数。阶段计数含预算拒绝的尝试，实际物理请求/搜索次数以 researchCalls/llmCalls/networkCalls 为准。本次只完成模拟响应与隔离数据库验证，未调用线上模型、未重跑赛事；中转服务是否真正支持该模型的 web_search 仍待下一次受控试跑观测。
+
+### 交叉校验来源键与首组 apply（2026-11-13）
+
+交叉校验输出的 `personKeys` 必须是当前输入的 `rows[].key`，不能是候选人物 ID 或 `gov_` 暂定人物 ID。请求的结构化输出 schema 按本批行键、组织键和证据键生成枚举；返回后再次按同一范围校验。跨组织问题拆为各组织的问题，不放宽业务校验或人工替代判断。候选集合是宽松召回，暂定来源档案、没有 catalog 匹配及 DNS 独立档案本身不构成身份矛盾。
+
+首组 apply 的交叉请求曾成功返回但耗时 112.7 秒，接近生产 120 秒限制；生产单次请求超时调整为 240 秒，现有归一化预算 5、研究预算 3 及 attempt 上限 3 保持。正式导入仍提交新的 `mode=apply` 任务，不将 dry-run 历史直接改为已写入。常驻 worker 保持禁止写入；授权的首组通过一次性 write-enabled runner 执行，结束恢复常驻 worker。

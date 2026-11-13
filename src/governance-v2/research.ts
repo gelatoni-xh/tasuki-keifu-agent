@@ -45,6 +45,17 @@ export const crossAnswerSchema = z.object({ issues: z.array(z.object({
   evidenceRefs: z.array(z.string()), reason: z.string().min(1),
   suggestedAction: z.enum(["keep", "review_organization", "research", "unresolved"]),
 }).strict()) }).strict();
+// Constrain the wire contract to source keys, never provisional/catalog entity IDs.
+function crossSchemaFor(context: unknown) {
+  const scope = context as { rows?: Array<{ key: string }>; organizations?: Array<{ key: string }>; catalog?: { evidence?: Array<{ key: string }> } };
+  const keys = (items?: Array<{ key: string }>) => [...new Set(items?.map(i => i.key) ?? [])];
+  const rows = keys(scope?.rows), organizations = keys(scope?.organizations), refs = keys(scope?.catalog?.evidence);
+  return z.object({ issues: z.array(crossAnswerSchema.shape.issues.element.extend({
+    personKeys: z.array(rows.length ? z.enum(rows) : z.string()).describe("Source rows[].key values for this organization; never person IDs"),
+    organizationKey: (organizations.length ? z.enum(organizations) : z.string()).describe("One source organizations[].key; split issues involving different organizations"),
+    evidenceRefs: z.array(refs.length ? z.enum(refs) : z.string()),
+  })) }).strict();
+}
 export type ResearchAnswer = z.infer<typeof researchAnswerSchema>;
 export type ResearchRequest = {
   kind: "person_identity" | "organization_identity" | "membership_conflict" | "normalization_light" | "normalization_cross_check" | "organization_adjudication";
@@ -234,7 +245,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
                 // This Codex route accepts the structural JSON Schema subset.
                 // Validate URL/date/string refinements with Zod after completion.
                 schema: JSON.parse(
-                  JSON.stringify(z.toJSONSchema(request.kind === "normalization_cross_check" ? crossAnswerSchema : request.kind === "normalization_light" || request.kind === "organization_adjudication" ? batchAnswerSchema : researchAnswerSchema)),
+                  JSON.stringify(z.toJSONSchema(request.kind === "normalization_cross_check" ? crossSchemaFor(request.context) : request.kind === "normalization_light" || request.kind === "organization_adjudication" ? batchAnswerSchema : researchAnswerSchema)),
                   (key, value) =>
                     ["$schema", "format", "pattern", "minLength"].includes(key)
                       ? undefined : value,
@@ -298,7 +309,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
       // Batch answers are validated against per-item scopes by the graph before use.
       phase = "output_schema";
       if (request.kind === "normalization_cross_check") {
-        try { return { crossAnswer: crossAnswerSchema.parse(parsed), evidence: request.providedEvidence ?? [] }; }
+        try { return { crossAnswer: crossSchemaFor(request.context).parse(parsed), evidence: request.providedEvidence ?? [] }; }
         catch (error) { diagnostic = errorDiagnostic(error, phase); return stop("research_unusable_response", metrics); }
       }
       if (request.kind === "normalization_light" || request.kind === "organization_adjudication") {

@@ -6,7 +6,7 @@ import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
 import { isDnsRow, normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/5";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/6";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
@@ -164,7 +164,7 @@ export async function crossCheck(input: BatchInput, ctx: Context, state: Normali
   const context = buildCrossCheckInput(input, ctx, state, resolution);
   next.crossCheckEvidenceRefs = context.catalog.evidence.map(e => e.key);
   const outcome = await research({ kind: "normalization_cross_check", subjectRef: input.raceSlug,
-    question: "检查全组暂定组织与人物结论的矛盾/循环证据。rows/organizations保留全组来源事实；candidateIds及暂定ID引用共享catalog，items是已有判断摘要，不是独立证据。仅引用catalog.evidence中的key。历史仅为已加载子集，注意截断标记；DNS不是出场，普通赛与NCG不可混淆，学校名称不能自动推出年级或Membership。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。没有问题返回issues空数组。",
+    question: "检查全组暂定组织与人物结论的矛盾/循环证据。rows/organizations保留全组来源事实；candidateIds及暂定ID引用共享catalog，items是已有判断摘要，不是独立证据。仅引用catalog.evidence中的key。历史仅为已加载子集，注意截断标记；DNS不是出场，普通赛与NCG不可混淆，学校名称不能自动推出年级或Membership。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。personKeys只能填写rows[].key（例如1766），绝不能填写provisionalPersonId或candidateIds；每个问题只涉及一个organizationKey，该问题的人物行必须属于该组织，跨组织问题拆开。candidateIds是宽松召回集合，不是已确认映射；gov暂定ID和无候选的新来源档案是正常流程，不能仅凭候选宽泛、无catalog匹配或当前DNS保留独立档案就报身份冲突。没有实质矛盾返回issues空数组。",
     context, allowedIds: [], allowNetwork: false,
   }, resolution.metrics);
   if (!outcome.crossAnswer) {

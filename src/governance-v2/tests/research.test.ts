@@ -19,6 +19,33 @@ const answer = {
   corrections: [],
   split: null,
 };
+test("cross-check wire schema permits source row keys and rejects person entity IDs", async () => {
+  const original = globalThis.fetch;
+  let personKey = "1765";
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const issue = body.text.format.schema.properties.issues.items;
+    assert.deepEqual(issue.properties.personKeys.items.enum, ["1765"]);
+    assert.deepEqual(issue.properties.organizationKey.enum, ["school"]);
+    assert.deepEqual(issue.properties.evidenceRefs.items.enum, ["source:1765", "source:school"]);
+    return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
+      issues: [{ issueKey: "check", issueType: "mapping_conflict", organizationKey: "school", personKeys: [personKey],
+        evidenceRefs: ["source:1765"], reason: "实质身份矛盾", suggestedAction: "unresolved" }],
+    }) }] }] }));
+  };
+  try {
+    const research = createResearcher({ apiKey: "test-only", model: "configured-model", timeoutMs: 1000, maxRequests: 3 });
+    const scoped = { ...request, kind: "normalization_cross_check" as const, context: {
+      rows: [{ key: "1765", provisionalPersonId: "gov_person" }], organizations: [{ key: "school" }],
+      catalog: { evidence: [{ key: "source:1765" }, { key: "source:school" }] },
+    } };
+    assert.deepEqual((await research(scoped, emptyMetrics())).crossAnswer?.issues[0].personKeys, ["1765"]);
+    personKey = "gov_person";
+    const metrics = emptyMetrics();
+    assert.equal((await research(scoped, metrics)).stopReason, "research_unusable_response");
+    assert.equal(metrics.researchCalls?.[0].diagnostic?.phase, "output_schema");
+  } finally { globalThis.fetch = original; }
+});
 test("research validates citations and structured output and stops at request budget", async () => {
   const original = globalThis.fetch;
   let calls = 0;
