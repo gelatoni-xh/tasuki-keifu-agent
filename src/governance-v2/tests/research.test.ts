@@ -414,3 +414,114 @@ test("permanent API failures and valid unresolved do not retry; transient exhaus
     assert.equal(result.answer?.verdict, "unresolved");
   } finally { globalThis.fetch = original; }
 });
+
+test("HTTP diagnostics capture One API errors, correlation, request envelope and safe headers without prompt/auth dumps", async () => {
+  const original = globalThis.fetch, originalLog = console.info;
+  const logs: string[] = [];
+  console.info = value => logs.push(String(value));
+  let sentId = '';
+  globalThis.fetch = async (_url, init) => {
+    sentId = new Headers(init?.headers).get('x-client-request-id')!;
+    assert.match(sentId, /^[a-f0-9-]{36}$/);
+    return new Response(JSON.stringify({ error: { code: 'invalid_json_schema', type: 'invalid_request_error', param: 'text.format.schema',
+      message: 'Schema unsupported; api_key=very-private-key Bearer abc123 https://user:pass@relay.test/v1?token=secret' },
+      request_id: 'relay-body-id', input: 'PRIVATE_PROMPT', arbitrary: 'PRIVATE_DUMP' }),
+      { status: 400, headers: { 'content-type': 'application/json', 'x-oneapi-request-id': 'relay-header-id', 'retry-after': '15', 'set-cookie': 'PRIVATE_COOKIE', authorization: 'PRIVATE_AUTH' } });
+  };
+  try {
+    const metrics = emptyMetrics();
+    const result = await createResearcher({ apiKey: 'very-private-key', baseUrl: 'https://relay.test/v1', model: 'mock', timeoutMs: 1234, maxRequests: 1 })(request, metrics);
+    assert.equal(result.stopReason, 'research_http_400');
+    assert.equal(metrics.llmCalls, 1);
+    const call = metrics.researchCalls![0];
+    assert.equal(call.clientRequestId, sentId);
+    assert.equal(call.providerRequestId, 'relay-header-id');
+    assert.equal(call.endpoint, 'https://relay.test/v1/responses');
+    assert.equal(call.httpStatus, 400);
+    assert.equal(call.timeoutMs, 1234);
+    assert.ok(call.requestBytes! > 1000);
+    assert.ok(call.headersReceivedMs! >= 0);
+    assert.ok(call.startedAt);
+    assert.equal(call.usageReported, false);
+    assert.equal(call.responseHeaders?.['retry-after'], '15');
+    assert.equal(call.diagnostic?.upstream?.code, 'invalid_json_schema');
+    assert.equal(call.diagnostic?.upstream?.param, 'text.format.schema');
+    assert.equal(call.diagnostic?.upstream?.requestId, 'relay-body-id');
+    const persisted = JSON.stringify(metrics) + logs.join('');
+    for (const secret of ['very-private-key', 'abc123', 'user:pass', '?token=', 'PRIVATE_PROMPT', 'PRIVATE_COOKIE', 'PRIVATE_AUTH', 'PRIVATE_DUMP']) assert.equal(persisted.includes(secret), false, secret);
+    assert.equal(JSON.parse(logs[0]).event, 'governance_research_request');
+    assert.equal(JSON.parse(logs[1]).event, 'governance_research_call');
+  } finally { globalThis.fetch = original; console.info = originalLog; }
+});
+
+test("HTTP error body collection handles relay variants, HTML, empty, truncation and broken reads", async () => {
+  const { httpErrorDiagnostic } = await import('../api-diagnostics.js');
+  for (const envelope of [{ message: 'relay error' }, { error: { message: '' }, message: 'relay error' }, { msg: 'relay error' }, { err: 'relay error' }, { error_msg: 'relay error' }, { header: { message: 'relay error' } }, { response: { error: { message: 'relay error' } } }, { error: 'relay error' }]) {
+    const d = await httpErrorDiagnostic(new Response(JSON.stringify(envelope), { status: 400 }), []);
+    assert.equal(d.upstream?.message, 'relay error');
+    assert.equal(d.bodyFormat, 'json');
+  }
+  const html = await httpErrorDiagnostic(new Response('<html><head><title>502 Bad Gateway</title></head><body>PRIVATE_BODY</body></html>', { status: 502 }), []);
+  assert.equal(html.upstream?.message, '502 Bad Gateway');
+  assert.equal(html.bodyFormat, 'html');
+  const empty = await httpErrorDiagnostic(new Response(null, { status: 401 }), []);
+  assert.equal(empty.bodyFormat, 'empty');
+  const text = await httpErrorDiagnostic(new Response('upstream token expired; sk-secret123', { status: 403 }), []);
+  assert.equal(text.upstream?.message, 'upstream token expired; [REDACTED]');
+  let cancelled = false;
+  const large = await httpErrorDiagnostic(new Response(new ReadableStream({ pull(c) { c.enqueue(new TextEncoder().encode('x'.repeat(65536))); }, cancel() { cancelled = true; } }), { status: 413 }), []);
+  assert.equal(large.bodyBytesRead, 32768);
+  assert.equal(large.bodyTruncated, true);
+  assert.equal(large.upstream?.message?.length, 1500);
+  assert.equal(cancelled, true);
+  const broken = await httpErrorDiagnostic(new Response(new ReadableStream({ start(c) { c.error(new DOMException('PRIVATE', 'TimeoutError')); } }), { status: 429 }), []);
+  assert.equal(broken.code, 'http_429');
+  assert.equal(broken.bodyReadError, 'TimeoutError');
+});
+
+test("failed and incomplete SSE preserve error metadata, early response IDs and usage exactly once per attempt", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const type of ['response.failed', 'response.incomplete', 'error']) {
+      globalThis.fetch = async () => new Response([
+        'data: ' + JSON.stringify({ type: 'response.created', response: { id: 'resp_failure_123', status: 'in_progress' } }),
+        'data: ' + JSON.stringify({ type, sequence_number: 9,
+          ...(type === 'error' ? { error: { code: 'server_error', message: 'upstream unavailable', type: 'upstream_error', param: 'model' } }
+            : { response: { id: 'resp_failure_123', status: type === 'response.failed' ? 'failed' : 'incomplete', error: { code: 'server_error', message: 'upstream unavailable' }, incomplete_details: { reason: 'max_output_tokens' }, usage: { input_tokens: 10, output_tokens: 2 } } }) }),
+        '',
+      ].join('\n\n'), { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_sse' } });
+      const metrics = emptyMetrics();
+      const result = await createResearcher({ apiKey: 'test', model: 'mock', timeoutMs: 1000, maxRequests: 1 })(request, metrics);
+      assert.equal(result.retryExhausted, true);
+      assert.equal(metrics.researchCalls!.length, 3);
+      assert.equal(metrics.inputTokens, type === 'error' ? 0 : 30);
+      assert.equal(metrics.outputTokens, type === 'error' ? 0 : 6);
+      assert.equal(metrics.costKnown, false);
+      for (const call of metrics.researchCalls!) {
+        assert.equal(call.responseId, 'resp_failure_123');
+        assert.equal(call.httpStatus, 200);
+        assert.equal(call.diagnostic?.upstream?.code, 'server_error');
+        assert.equal(call.diagnostic?.upstream?.message, 'upstream unavailable');
+        assert.equal(call.diagnostic?.eventType, type);
+        assert.equal(call.diagnostic?.sequenceNumber, 9);
+        assert.equal(call.usageReported, type !== 'error');
+      }
+      assert.equal(new Set(metrics.researchCalls!.map(c => c.clientRequestId)).size, 3);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("HTTP 200 JSON failures and truncated SSE retain actionable diagnostics", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ id: 'resp_json_failure', status: 'failed', error: { code: 'model_not_found', message: 'No model available' } }));
+    const metrics = emptyMetrics();
+    assert.equal((await createResearcher({ apiKey: 'test', model: 'mock', timeoutMs: 1000, maxRequests: 1 })(request, metrics)).stopReason, 'research_response_failed');
+    assert.equal(metrics.researchCalls![0].diagnostic?.upstream?.code, 'model_not_found');
+    globalThis.fetch = async () => new Response('data: {"type":"response.created","response":{"id":"resp_truncated","status":"in_progress"}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    const truncated = emptyMetrics();
+    await createResearcher({ apiKey: 'test', model: 'mock', timeoutMs: 1000, maxRequests: 1 })(request, truncated);
+    assert.equal(truncated.researchCalls![0].responseId, 'resp_truncated');
+    assert.equal(truncated.researchCalls![0].diagnostic?.code, 'stream_missing_completion');
+  } finally { globalThis.fetch = original; }
+});
