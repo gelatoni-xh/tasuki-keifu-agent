@@ -100,7 +100,7 @@ node --import tsx src/governance-v2/cli.ts cleanup-checkpoints
 
 worker 通过数据库租约领取任务，赛事内严格串行。有限技术重试耗尽后任务失败、后续区组不执行；排查并 retry 后从未完成处恢复。已完成区组不再写入，提交后崩溃只补收尾。leaseToken fencing 阻止过时 worker 提交。输入文件损坏须修复持久存储里的原对象，不能绕过 hash 校验。
 
-研究默认每批最多 3 次，轻量/交叉/组织裁决共享独立的 5 次预算，重启保留额度。单次超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置（代码默认 25 秒，当前部署使用 120 秒）。预算不足、未配置和资料不足保留 unresolved；API 超时、HTTP/响应结构错误属于技术失败，进入有限重试。普通缺所属、模糊 PB 不联网。规则版本 2026-11-13.2；归一化策略 whole-group-cross-check/5。
+研究每批默认 3 个重型逻辑请求，轻量/交叉/组织裁决共享独立的 5 个逻辑请求额度，重启保留额度。六类 LLM 请求最多首次加两次重试，退避 250ms/500ms；重试有独立持久化额度（逻辑额度的两倍）。暂时网络故障、超时、408/409/429/5xx、不完整响应和 JSON/schema/引用错误可重试；正常 unresolved、拒答、配置/预算不足、输入过大、400/401/403 不重试。批量响应按输入候选与证据约束并逐项检查作用域，重试附安全错误反馈。modelJournal 保存耗尽结果，恢复任务不刷新该请求额度。researchCalls 记录 attemptNo/maxAttempts/retryReason/retryExhausted；报告与邮件区分 LLM 重试和批次重试，累计全部尝试的调用与 tokens。超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置。普通缺所属、模糊 PB 不联网。归一化策略 whole-group-cross-check/7。
 
 严重 unresolved 或技术失败才排队批次告警，赛事所有终态排队总结；邮件中写导入条数、修复操作数、计划修复数与自然语言 unresolved。dry_run 实际修复数是 0。汇报由模板生成，不为统计调用 LLM。SMTP 失败持久重试，Message-ID 稳定，但不保证提供方端到端恰好一次。
 

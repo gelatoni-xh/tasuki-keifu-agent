@@ -6,7 +6,7 @@ import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
 import { isDnsRow, normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/6";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/7";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;

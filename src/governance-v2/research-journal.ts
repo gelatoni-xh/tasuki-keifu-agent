@@ -18,7 +18,7 @@ export function journalResearch(db: GovernanceDB, task: Task, attemptId: string,
       [attemptId, callId],
     )).rows[0]?.entry as Entry | undefined);
     let entry = cached;
-    if (!entry || (!entry.outcome.answer && !entry.outcome.batchAnswer && !entry.outcome.crossAnswer && !["research_budget_exhausted", "research_not_configured", "research_has_no_verified_source_reference", "research_scope_too_large", "identity_footprint_too_large"].includes(entry.outcome.stopReason ?? ""))) {
+    if (!entry || (!entry.outcome.retryExhausted && !entry.outcome.answer && !entry.outcome.batchAnswer && !entry.outcome.crossAnswer && !["research_budget_exhausted", "research_not_configured", "research_has_no_verified_source_reference", "research_scope_too_large", "identity_footprint_too_large"].includes(entry.outcome.stopReason ?? ""))) {
       const usage = emptyMetrics();
       const outcome = await research(request, usage);
       if (cached) {

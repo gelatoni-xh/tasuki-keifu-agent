@@ -30,6 +30,8 @@ export type Report = {
     attemptDurationMs: number;
     retryDurationMs: number;
     llmCalls: number;
+    llmRetryCount?: number;
+    llmRetryExhaustedCount?: number;
     networkCalls: number;
     ruleDecisions: number;
     inputTokens: number;
@@ -62,7 +64,7 @@ export function reportText(report: Report) {
     ...(report.observability
       ? [
           `观测：赛事耗时 ${report.observability.eventDurationMs ?? "未知"}ms；Agent 执行 ${report.observability.agentExecutions} 次，累计 ${report.observability.agentDurationMs}ms；规则判断 ${report.observability.ruleDecisions} 次。`,
-          `LLM：${report.observability.llmCalls} 次；网络查询 ${report.observability.networkCalls} 次；tokens ${report.observability.inputTokens}/${report.observability.outputTokens}；估算成本 $${(report.observability.estimatedCostUsd === null ? "未知（未配置价格）" : report.observability.estimatedCostUsd.toFixed(6))}；模型 ${report.observability.llmModels.join(", ") || "无"}。`,
+          `LLM：${report.observability.llmCalls} 次（其中调用重试 ${report.observability.llmRetryCount ?? 0} 次，重试耗尽 ${report.observability.llmRetryExhaustedCount ?? 0} 项）；网络查询 ${report.observability.networkCalls} 次；tokens ${report.observability.inputTokens}/${report.observability.outputTokens}；估算成本 $${(report.observability.estimatedCostUsd === null ? "未知（未配置价格）" : report.observability.estimatedCostUsd.toFixed(6))}；模型 ${report.observability.llmModels.join(", ") || "无"}。`,
           `队列等待 ${report.observability.queueWaitMs ?? "未知"}ms；attempt ${report.observability.attemptCount} 次（重试 ${report.observability.retryCount} 次），执行 ${report.observability.attemptDurationMs}ms，重试耗时 ${report.observability.retryDurationMs}ms。`,
           `治理效果：resolved ${report.observability.resolved} 项，unresolved ${report.observability.unresolvedFindings} 项；每导入行成本 ${report.observability.costPerImportedRowUsd == null ? "未知" : `$${report.observability.costPerImportedRowUsd.toFixed(6)}`}，每计划行成本 ${report.observability.costPerPlannedRowUsd == null ? "未知" : `$${report.observability.costPerPlannedRowUsd.toFixed(6)}`}。`,
           ...report.observability.modelUsage.map((m) => `模型 ${m.model}：${m.calls} 次，tokens ${m.inputTokens}/${m.outputTokens}。`),
