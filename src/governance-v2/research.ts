@@ -36,9 +36,16 @@ export const researchAnswerSchema = z
       .nullable(),
   })
   .strict();
+export const personAssessmentSchema = z.object({
+  candidateId: z.string(),
+  nameRelation: z.enum(["exact", "possible_transcription", "different", "unclear"]),
+  samePersonPlausibility: z.enum(["low", "medium", "high"]),
+  reason: z.string().min(1),
+}).strict();
 export const batchAnswerSchema = z.object({ items: z.array(z.object({
   itemKey: z.string(), verdict: z.enum(["match", "distinct", "unresolved"]),
   targetId: z.string().nullable(), evidenceRefs: z.array(z.string()), reason: z.string().min(1),
+  personAssessments: z.array(personAssessmentSchema).optional(),
 }).strict()) }).strict();
 export const crossAnswerSchema = z.object({ issues: z.array(z.object({
   issueKey: z.string(), issueType: z.enum(["organization_variant", "mapping_conflict", "circular_evidence", "insufficient_evidence"]), organizationKey: z.string(), personKeys: z.array(z.string()),
@@ -62,10 +69,13 @@ function batchSchemaFor(context: unknown) {
   const items = (context as { items?: BatchScope[] })?.items ?? [];
   const keys = items.map(i => i.itemKey), ids = [...new Set(items.flatMap(i => i.allowedIds))];
   const refs = [...new Set(items.flatMap(i => i.evidence.map(e => e.key)))];
+  const personBatch = items.length > 0 && items.every(i => i.itemKey.startsWith("person_identity:"));
+  const assessments = z.array(personAssessmentSchema.extend({ candidateId: ids.length ? z.enum(ids) : z.string() }));
   return z.object({ items: z.array(batchAnswerSchema.shape.items.element.extend({
     itemKey: keys.length ? z.enum(keys) : z.string(),
     targetId: ids.length ? z.enum(ids).nullable() : z.null(),
     evidenceRefs: refs.length ? z.array(z.enum(refs)) : z.array(z.string()).max(0),
+    personAssessments: personBatch ? assessments : assessments.optional(),
   })) }).strict().superRefine((answer, ctx) => {
     const seen = new Set<string>();
     for (const [index, item] of answer.items.entries()) {
@@ -73,6 +83,15 @@ function batchSchemaFor(context: unknown) {
       const fail = (field: string, message: string) => ctx.addIssue({ code: "custom", path: ["items", index, field], message });
       if (!scope || seen.has(item.itemKey)) { fail("itemKey", "Unknown or duplicate itemKey"); continue; }
       seen.add(item.itemKey);
+      if (personBatch) {
+        const assessments = item.personAssessments ?? [];
+        if (assessments.length !== scope.allowedIds.length ||
+            new Set(assessments.map(a => a.candidateId)).size !== scope.allowedIds.length ||
+            assessments.some(a => !scope.allowedIds.includes(a.candidateId)))
+          fail("personAssessments", "Assess every candidate in this item exactly once");
+        if (item.verdict === "distinct" && assessments.some(a => a.samePersonPlausibility !== "low"))
+          fail("personAssessments", "Distinct must exclude every candidate");
+      }
       if (item.evidenceRefs.some(ref => !scope.evidence.some(e => e.key === ref)))
         fail("evidenceRefs", "Evidence belongs to another item");
       if (item.verdict === "distinct" && !item.evidenceRefs.length) fail("evidenceRefs", "Distinct requires evidence");
@@ -98,6 +117,7 @@ export type ResearchRequest = {
   providedEvidence?: Evidence[];
 };
 export type ResearchOutcome = {
+  personAssessments?: z.infer<typeof personAssessmentSchema>[];
   answer?: ResearchAnswer;
   batchAnswer?: z.infer<typeof batchAnswerSchema>;
   crossAnswer?: z.infer<typeof crossAnswerSchema>;

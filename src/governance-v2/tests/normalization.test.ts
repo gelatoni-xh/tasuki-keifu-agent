@@ -20,9 +20,50 @@ function context(): Context {
   };
 }
 function items(r: ResearchRequest) { return (r.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items; }
-const match: Researcher = async r => r.kind === "normalization_cross_check" ? { crossAnswer: { issues: [] }, evidence: [] } : {
+const match: Researcher = async r => r.kind === "person_identity"
+  ? { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立冲突需保留待确认", evidence: [], corrections: [], split: null }, evidence: [] }
+  : r.kind === "normalization_cross_check" ? { crossAnswer: { issues: [] }, evidence: [] } : {
   batchAnswer: { items: items(r).map(i => ({ itemKey: i.itemKey, verdict: "match", targetId: i.allowedIds[0], evidenceRefs: i.evidence.map(e => e.key), reason: "来源与历史资料一致" })) }, evidence: [],
 };
+test("person light triage routes a single plausible transcription to research and excludes weak homophones", async () => {
+  for (const scenario of ["near_name", "different_name", "weak_unresolved", "cross_conflict"] as const) {
+    const data = input(), ctx = context();
+    data.rows = data.rows.slice(0, 1);
+    data.rows[0].name = "吉田悠騎"; data.rows[0].kana = "ヨシダユウキ";
+    ctx.people = [{ id: "pa", slug: "a", displayNameJa: scenario === "near_name" ? "吉田悠基" : "義多祐樹", displayNameKana: "ヨシダユウキ" }];
+    if (scenario === "weak_unresolved") ctx.people.push({ id: "pb", slug: "b", displayNameJa: "芳田勇紀", displayNameKana: "ヨシダユウキ" });
+    let deepCalls = 0, crossSawAssessment = false;
+    const research: Researcher = async r => {
+      if (r.kind === "person_identity") {
+        deepCalls++;
+        assert.equal(r.allowNetwork, true);
+        assert.ok((r.context as { lightAssessment?: unknown }).lightAssessment);
+        return { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "联网后仍不足", evidence: [], corrections: [], split: null }, evidence: [] };
+      }
+      if (r.kind === "normalization_cross_check") {
+        crossSawAssessment = JSON.stringify(r.context).includes("samePersonPlausibility");
+        return { crossAnswer: { issues: scenario === "cross_conflict" ? [{ issueKey: "conflict", issueType: "mapping_conflict", organizationKey: "o", personKeys: ["a"], evidenceRefs: ["source:a"], reason: "独立履历冲突", suggestedAction: "research" }] : [] }, evidence: [] };
+      }
+      assert.match(r.question, /OCR/);
+      return { batchAnswer: { items: items(r).map(i => ({ itemKey: i.itemKey,
+        verdict: scenario === "different_name" ? "distinct" : "unresolved", targetId: null,
+        reason: scenario === "near_name" ? "只差一同音字，可能误录，需核查" : "汉字差异大且无独立关联",
+        evidenceRefs: i.evidence.map(e => e.key), personAssessments: i.allowedIds.map(candidateId => ({ candidateId,
+          nameRelation: scenario === "near_name" ? "possible_transcription" : "different",
+          samePersonPlausibility: scenario === "near_name" ? "medium" : "low", reason: "逐候选分析姓名及来源差异" })) })) }, evidence: [] };
+    };
+    const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+    assert.equal(deepCalls, ["near_name", "cross_conflict"].includes(scenario) ? 1 : 0, scenario);
+    assert.equal(crossSawAssessment, true);
+    assert.equal(result.normalization.decisions["person_identity:a"].personAssessments?.length, ctx.people.length);
+    assert.equal(result.resolution.metrics.personIdentityTriage?.[0].assessments.length, ctx.people.length);
+    if (scenario === "different_name") {
+      assert.ok(result.plan.changes.some(c => c.operation.kind === "create_person"));
+      assert.equal(result.plan.findings.filter(f => f.status === "unresolved").length, 0);
+    }
+    if (scenario === "weak_unresolved") assert.equal(result.resolution.metrics.personResearchRouting?.[0].reason, "low_identity_plausibility");
+  }
+});
 test("whole unresolved group uses one person call; source plans are replaced; DNS creates no membership", async () => {
   const calls: ResearchRequest[] = [];
   const graph = buildBatchGraph({ loadContext: async () => context(), research: async (r,m) => { calls.push(r); m.llmCalls++; return match(r,m); } });

@@ -320,6 +320,10 @@ export type Metrics = {
   normalizationStages?: Array<{ stage: string; inputCount: number; resolvedCount: number; remainingCount: number; durationMs: number }>;
   normalizationPolicyVersion?: string;
   normalizationDnsSkipped?: string[];
+  personIdentityTriage?: Array<{ subjectRef: string; stage: string; verdict: string; assessments: Array<{
+    candidateId: string; nameRelation: string; samePersonPlausibility: string; reason: string;
+  }> }>;
+  personResearchRouting?: Array<{ subjectRef: string; eligible: boolean; reason: string; candidateIds: string[] }>;
   organizationResearch?: Array<{ subjectRef: string; candidateCount: number; eligibility: "unresolved_light" | "cross_check_conflict"; result: string }>;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
   normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string; evidenceRefs?: string[]; reason?: string }>;

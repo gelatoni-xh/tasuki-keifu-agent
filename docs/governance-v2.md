@@ -100,7 +100,7 @@ node --import tsx src/governance-v2/cli.ts cleanup-checkpoints
 
 worker 通过数据库租约领取任务，赛事内严格串行。有限技术重试耗尽后任务失败、后续区组不执行；排查并 retry 后从未完成处恢复。已完成区组不再写入，提交后崩溃只补收尾。leaseToken fencing 阻止过时 worker 提交。输入文件损坏须修复持久存储里的原对象，不能绕过 hash 校验。
 
-研究每批默认 3 个重型逻辑请求，轻量/交叉/组织裁决共享独立的 5 个逻辑请求额度，重启保留额度。六类 LLM 请求最多首次加两次重试，退避 250ms/500ms；重试有独立持久化额度（逻辑额度的两倍）。暂时网络故障、超时、408/409/429/5xx、不完整响应和 JSON/schema/引用错误可重试；正常 unresolved、拒答、配置/预算不足、输入过大、400/401/403 不重试。批量响应按输入候选与证据约束并逐项检查作用域，重试附安全错误反馈。modelJournal 保存耗尽结果，恢复任务不刷新该请求额度。researchCalls 记录 attemptNo/maxAttempts/retryReason/retryExhausted；报告与邮件区分 LLM 重试和批次重试，累计全部尝试的调用与 tokens。超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置。普通缺所属、模糊 PB 不联网。归一化策略 whole-group-cross-check/7。
+研究每批默认 3 个重型逻辑请求，轻量/交叉/组织裁决共享独立的 5 个逻辑请求额度，重启保留额度。六类 LLM 请求最多首次加两次重试，退避 250ms/500ms；重试有独立持久化额度（逻辑额度的两倍）。暂时网络故障、超时、408/409/429/5xx、不完整响应和 JSON/schema/引用错误可重试；正常 unresolved、拒答、配置/预算不足、输入过大、400/401/403 不重试。批量响应按输入候选与证据约束并逐项检查作用域，重试附安全错误反馈。modelJournal 保存耗尽结果，恢复任务不刷新该请求额度。researchCalls 记录 attemptNo/maxAttempts/retryReason/retryExhausted；报告与邮件区分 LLM 重试和批次重试，累计全部尝试的调用与 tokens。超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置。普通缺所属、模糊 PB 不联网。归一化策略 whole-group-cross-check/8。
 
 严重 unresolved 或技术失败才排队批次告警，赛事所有终态排队总结；邮件中写导入条数、修复操作数、计划修复数与自然语言 unresolved。dry_run 实际修复数是 0。汇报由模板生成，不为统计调用 LLM。SMTP 失败持久重试，Message-ID 稳定，但不保证提供方端到端恰好一次。
 
@@ -151,3 +151,11 @@ organizationResearch 逐对象记录候选数、进入原因及结果，normaliz
 交叉校验输出的 `personKeys` 必须是当前输入的 `rows[].key`，不能是候选人物 ID 或 `gov_` 暂定人物 ID。请求的结构化输出 schema 按本批行键、组织键和证据键生成枚举；返回后再次按同一范围校验。跨组织问题拆为各组织的问题，不放宽业务校验或人工替代判断。候选集合是宽松召回，暂定来源档案、没有 catalog 匹配及 DNS 独立档案本身不构成身份矛盾。
 
 首组 apply 的交叉请求曾成功返回但耗时 112.7 秒，接近生产 120 秒限制；生产单次请求超时调整为 240 秒，现有归一化预算 5、研究预算 3 及 attempt 上限 3 保持。正式导入仍提交新的 `mode=apply` 任务，不将 dry-run 历史直接改为已写入。常驻 worker 保持禁止写入；授权的首组通过一次性 write-enabled runner 执行，结束恢复常驻 worker。
+
+### 同音姓名轻量分流（2026-11-13，策略 /8）
+
+人物轻量及受影响人物重评输出逐候选 `personAssessments`：candidateId、nameRelation（exact/possible_transcription/different/unclear）、samePersonPlausibility（low/medium/high）与 reason。等级表示调查优先级，不是校准后的概率。真实响应必须覆盖该项 allowedIds 恰好一次；缺失、重复、越界及 distinct 却仍有中高可能性候选属于输出契约错误，进入有限修复重试。
+
+同音只是召回线索，不同所属不能单独排除转校。汉字差异大且无其他关联可以解释排除；只差一同音字或疑似 OCR/误录需指出具体疑点，不能仅按相同字数匹配。match 仍需独立身份依据，distinct 须能排除所有候选；unresolved 中存在中高可能性候选时，即使只有一个候选也可进入重型。全低可能性不再因人数多自动联网；生日冲突和实质交叉冲突保留升级入口。旧结果缺少评估时沿用原人数兜底，新生产响应必填。
+
+逐候选解释随 decision 传给交叉及重型，明确它是待验证假设而非独立证据。`personIdentityTriage`、`personResearchRouting` 保留每项判断及研究进入/跳过原因。策略为 `whole-group-cross-check/8`，保留历史尝试；本次未重跑赛事，真实效果待观测。
