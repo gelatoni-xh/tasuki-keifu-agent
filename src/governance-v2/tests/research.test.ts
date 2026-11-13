@@ -265,3 +265,22 @@ test("whole-group schemas disable tools and have a fixed five-call allowance sep
     assert.equal(metrics.costKnown, false);
   } finally { globalThis.fetch = original; }
 });
+
+test("organization network match requires a search call, tool citation and nonempty quote", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const variant of ["no-search", "empty-quote", "valid", "incomplete"] as const) {
+      globalThis.fetch = async () => new Response(JSON.stringify({ status: variant === "incomplete" ? "incomplete" : "completed",
+        output: [...variant === "no-search" ? [] : [{ type: "web_search_call", action: { sources: [{ url: "https://example.org/official" }] } }],
+          { type: "message", content: [{ type: "output_text", text: JSON.stringify({ ...answer, evidence: [{ url: "https://example.org/official", quote: variant === "empty-quote" ? " " : "学校所属" }] }), annotations: [{ url: "https://example.org/official" }] }] }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }));
+      const metrics = emptyMetrics();
+      const result = await createResearcher({ apiKey: "mock", model: "mock", maxRequests: 1, timeoutMs: 1000 })({ ...request, kind: "organization_identity", allowNetwork: true }, metrics);
+      if (variant === "valid") assert.equal(result.answer?.targetId, "p");
+      else assert.equal(result.stopReason, variant === "incomplete" ? "research_response_incomplete" : "research_has_no_verified_source_reference");
+      assert.equal(metrics.costKnown, false);
+      assert.equal(metrics.inputTokens, 10);
+    }
+  } finally { globalThis.fetch = original; }
+});

@@ -180,3 +180,7 @@ export function shouldUpdatePB(
         reliability >= existing.reliability))
   );
 }
+
+export function isDnsRow(row: { notes?: string; mark?: string }): boolean {
+  return /\bDNS\b/i.test(`${row.mark ?? ""} ${row.notes ?? ""}`);
+}

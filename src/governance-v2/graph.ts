@@ -20,7 +20,7 @@ import {
   verifyFacts,
 } from "./agents.js";
 import { initialNormalization, projectNormalization, lightBatch, crossCheck,
-  validateCrossCheck, finalizeNormalization, adjudicate, reassess, deepResearch, type NormalizationState } from "./normalization.js";
+  validateCrossCheck, finalizeNormalization, adjudicate, researchOrganizations, reassess, deepResearch, type NormalizationState } from "./normalization.js";
 import type { Researcher } from "./research.js";
 
 const State = Annotation.Root({
@@ -39,7 +39,7 @@ export const graphNodeNames = [
   "load_batch_context",
   "organization_rules", "organization_light_batch", "person_rules", "person_light_batch",
   "prepare_cross_check", "normalization_cross_check", "validate_cross_check", "organization_adjudication",
-  "affected_person_reassessment", "normalization_deep_research", "finalize_normalization",
+  "organization_network_research", "affected_person_reassessment", "normalization_deep_research", "finalize_normalization",
   "govern_membership",
   "verify_person_facts",
   "aggregate_governance_result",
@@ -153,6 +153,11 @@ export function buildBatchGraph(deps: {
       const normalization = await adjudicate(s.input, s.context, s.normalization, base, deps.research);
       return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
     }))
+    .addNode("organization_network_research", node("organization_network_research", async s => {
+      const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
+      const normalization = await researchOrganizations(s.input, s.context, s.normalization, base, deps.research);
+      return { normalization, resolution: await projectNormalization(s.batchId, s.input, s.context, normalization, metrics, true) };
+    }))
     .addNode("affected_person_reassessment", node("affected_person_reassessment", async s => {
       const metrics = structuredClone(s.resolution.metrics), base = { ...s.resolution, metrics };
       const normalization = await reassess(s.input, s.context, s.normalization, base, deps.research);
@@ -189,7 +194,8 @@ export function buildBatchGraph(deps: {
     .addEdge("prepare_cross_check", "normalization_cross_check")
     .addEdge("normalization_cross_check", "validate_cross_check")
     .addEdge("validate_cross_check", "organization_adjudication")
-    .addEdge("organization_adjudication", "affected_person_reassessment")
+    .addEdge("organization_adjudication", "organization_network_research")
+    .addEdge("organization_network_research", "affected_person_reassessment")
     .addEdge("affected_person_reassessment", "normalization_deep_research")
     .addEdge("normalization_deep_research", "finalize_normalization")
     .addConditionalEdges("finalize_normalization", route_membership_agent, [

@@ -2,7 +2,7 @@ import "dotenv/config";
 import path from "node:path";
 import { adaptRacePayload } from "./legacy-adapter.js";
 import { manifestSchema } from "./contracts.js";
-import { positiveInteger } from "./config.js";
+import { positiveInteger, nonNegative } from "./config.js";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -225,10 +225,6 @@ async function main() {
     if (readPool !== pool) await readPool.end();
     await pool.end();
   }
-}
-function nonNegative(value: string | undefined) {
-  const v = Number(value);
-  return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : "governance_failed");

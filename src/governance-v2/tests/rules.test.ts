@@ -375,3 +375,17 @@ test("governance mail accepts gelatoni-xh MAIL_CONFIG shapes", () => {
   );
   assert.throws(() => parseMailConfig('{"provider":"smtp"}'), /requires/);
 });
+
+test("membership provider failures block; incomplete corrections do not partially mutate dates", async () => {
+  const input = batchInputSchema.parse({ unitType: "group", unitKey: "1", sequence: 0, sourceId: "s", raceSlug: "race", organizations: [], rows: [{ key: "r", name: "選手" }] });
+  const fixture = structuredClone(ctx);
+  fixture.memberships = [membership({ id: "one", startDate: "2020-04-01", endDate: "2023-03-31", startBasis: "source", endBasis: "source" }),
+    membership({ id: "two", organizationId: "h2", startDate: "2021-04-01", endDate: "2024-03-31", startBasis: "source", endBasis: "source" })];
+  await assert.rejects(governMemberships("b", input, fixture, res, async () => ({ stopReason: "research_timeout", evidence: [] })), /Membership research model failure/);
+  const result = await governMemberships("b", input, fixture, res, async () => ({ answer: { verdict: "correct_membership", targetId: null, duplicateIds: [], reason: "不能部分应用", evidence: [], corrections: [
+    { membershipId: "one", startDate: null, endDate: "2021-03-31" },
+    { membershipId: "foreign", startDate: "2022-01-01", endDate: null },
+  ], split: null }, evidence: [] }));
+  assert.ok(result.findings.some(f => f.status === "unresolved"));
+  assert.equal(result.changes.filter(c => c.operation.kind === "membership").length, 0);
+});

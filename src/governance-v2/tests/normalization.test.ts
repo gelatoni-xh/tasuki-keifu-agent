@@ -9,7 +9,7 @@ function input() {
   return manifestSchema.parse({ version: CONTRACT_VERSION, requestKey: "new-run", eventEditionId: "e", mode: "dry_run", batches: [{
     unitType: "group", unitKey: "1", sequence: 0, sourceId: "s", raceSlug: "ordinary-333-heat-1",
     organizations: [{ key: "o", name: "試験高校", type: "high_school" }],
-    rows: ["a", "b"].map(key => ({ key, name: `選手${key}`, organizationKey: "o", notes: "DNS" })),
+    rows: ["a", "b"].map(key => ({ key, name: `選手${key}`, organizationKey: "o", notes: "" })),
   }] }).batches[0];
 }
 function context(): Context {
@@ -216,7 +216,7 @@ test("cross-check deduplicates large unrelated catalogs while retaining full gro
   assert.ok(JSON.stringify(compact).length < JSON.stringify(legacy).length / 10);
   assert.equal(compact.rows.length, 44);
   assert.equal(compact.organizations.length, 2);
-  assert.ok(compact.rows.every(r => r.notes === "DNS"));
+  assert.ok(compact.rows.every(r => r.notes === ""));
   assert.ok(compact.catalog.people.some(p => p.id === "conflict"));
   assert.equal(compact.catalog.organizations.length, 1);
   assert.equal(compact.catalog.evidence.filter(e => e.key === "membership:ma").length, 1);
@@ -294,4 +294,74 @@ test("cross-check can reject a historical rule match without repeating lightweig
   assert.deepEqual(result.resolution.metrics.normalizationRuleMatches, []);
   assert.equal(calls.filter(r => r.kind === "normalization_cross_check").length, 1);
   assert.equal(calls.filter(r => r.kind === "normalization_light").length, 1);
+});
+
+test("current DNS bypasses identity calls and membership inference; historical DNS still identifies starters", async () => {
+  const data = input(), ctx = context(), calls: ResearchRequest[] = [];
+  data.rows[0].notes = "DNS";
+  data.rows[0].memberships = [{ organizationKey: "o", type: "enrolled", grade: 3, endState: "unknown" }];
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research: async (r,m) => { calls.push(r); return match(r,m); } }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+  assert.deepEqual(items(calls.find(r => r.subjectRef === "person")!).map(i => i.itemKey), ["person_identity:b"]);
+  assert.notEqual(result.resolution.personMap.a, "pa");
+  assert.equal(result.resolution.personMap.b, "pb");
+  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
+  assert.equal(calls.filter(r => r.kind === "person_identity").length, 0);
+});
+
+test("unresolved organization suspends all dependent matches even without canonical ID correction", async () => {
+  const data = input(), ctx = context(), calls: ResearchRequest[] = [];
+  const research: Researcher = async (r,m) => {
+    calls.push(r);
+    if (r.kind === "normalization_cross_check") return { crossAnswer: { issues: [{ issueKey: "org", issueType: "organization_variant", organizationKey: "o", personKeys: ["a"], evidenceRefs: ["source:o"], reason: "组织仍有疑问", suggestedAction: "review_organization" }] }, evidence: [] };
+    if (r.kind === "organization_adjudication") return { batchAnswer: { items: items(r).map(i => ({ itemKey: i.itemKey, verdict: "unresolved", targetId: null, evidenceRefs: [], reason: "证据不足" })) }, evidence: [] };
+    if (r.kind === "organization_identity") return { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "官网无证据", evidence: [], corrections: [], split: null }, evidence: [] };
+    return match(r,m);
+  };
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+  assert.deepEqual(result.normalization.pendingOrganizationKeys, ["o"]);
+  assert.notEqual(result.resolution.organizationMap.o, "o1");
+  assert.notEqual(result.resolution.personMap.a, "pa");
+  assert.notEqual(result.resolution.personMap.b, "pb");
+  assert.equal(calls.filter(r => r.subjectRef === "affected_person_reassessment").length, 0);
+  assert.equal(calls.filter(r => r.kind === "person_identity").length, 0);
+  assert.equal(result.resolution.metrics.normalizationSummary?.affectedPeople, 2);
+});
+
+test("unique weak organization candidate gets single-entity search before one dependent reassessment; checkpoint does not repeat search", async () => {
+  const data = input(), ctx = context(), calls: ResearchRequest[] = [], saver = new MemorySaver();
+  data.organizations[0].name = "試験第1高校";
+  const research: Researcher = async (r,m) => {
+    calls.push(r);
+    if (r.kind === "normalization_light" && r.subjectRef === "organization") return { batchAnswer: { items: items(r).map(i => ({ itemKey: i.itemKey, verdict: "unresolved", targetId: null, evidenceRefs: [], reason: "唯一弱候选仍不足" })) }, evidence: [] };
+    if (r.kind === "organization_identity") {
+      assert.equal(r.allowNetwork, true);
+      assert.deepEqual(r.allowedIds, ["o1"]);
+      assert.ok(!JSON.stringify(r.context).includes("personMap"));
+      return { answer: { verdict: "match", targetId: "o1", duplicateIds: [], reason: "官网校名", evidence: [{ url: "https://school.example/about", quote: "試験第1高校" }], corrections: [], split: null }, evidence: [{ url: "https://school.example/about", quote: "試験第1高校" }] };
+    }
+    return match(r,m);
+  };
+  const config = { configurable: { thread_id: "organization-search" }, interruptAfter: ["organization_network_research" as const] };
+  const graph = buildBatchGraph({ loadContext: async () => ctx, research, checkpointer: saver });
+  await graph.invoke({ batchId: "b", input: data, mode: "dry_run" }, config);
+  const result = await graph.invoke(null, { configurable: config.configurable });
+  assert.equal(calls.filter(r => r.kind === "organization_identity").length, 1);
+  assert.equal(calls.filter(r => r.subjectRef === "affected_person_reassessment").length, 1);
+  assert.equal(result.resolution.organizationMap.o, "o1");
+  assert.deepEqual(result.resolution.personMap, { a: "pa", b: "pb" });
+  assert.deepEqual(result.normalization.pendingOrganizationKeys, []);
+  assert.equal(result.resolution.metrics.normalizationStages?.find(s => s.stage === "organization_network_research")?.resolvedCount, 1);
+});
+
+test("cross-check removes unrelated known evidence and keeps unsupported references blocking", async () => {
+  const { initialNormalization, validateCrossCheck } = await import("../normalization.js");
+  const data = input(), state = initialNormalization();
+  data.organizations.push({ key: "unrelated", name: "別校", type: "high_school" });
+  state.issues = [{ issueKey: "wrong", issueType: "organization_variant", organizationKey: "o", personKeys: ["a"], evidenceRefs: ["source:unrelated"], reason: "无关证据", suggestedAction: "review_organization" }];
+  const checked = validateCrossCheck(data, state, context());
+  assert.deepEqual(checked.issues[0].evidenceRefs, []);
+  assert.equal(checked.issues[0].suggestedAction, "unresolved");
+  assert.deepEqual(state.issues[0].evidenceRefs, ["source:unrelated"]);
+  state.issues[0].evidenceRefs = ["invented"];
+  assert.throws(() => validateCrossCheck(data, state, context()), /unsupported/);
 });
