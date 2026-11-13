@@ -73,12 +73,16 @@ function batchSchemaFor(context: unknown) {
   const refs = [...new Set(items.flatMap(i => i.evidence.map(e => e.key)))];
   const personBatch = items.length > 0 && items.every(i => i.itemKey.startsWith("person_identity:"));
   const assessments = z.array(personAssessmentSchema.extend({ candidateId: ids.length ? z.enum(ids) : z.string() }));
-  return z.object({ items: z.array(batchAnswerSchema.shape.items.element.extend({
+  const itemSchema = batchAnswerSchema.shape.items.element.extend({
     itemKey: keys.length ? z.enum(keys) : z.string(),
     targetId: ids.length ? z.enum(ids).nullable() : z.null(),
     evidenceRefs: refs.length ? z.array(z.enum(refs)) : z.array(z.string()).max(0),
-    personAssessments: personBatch ? assessments : assessments.optional(),
-  })) }).strict().superRefine((answer, ctx) => {
+    personAssessments: assessments,
+  });
+  const outputItemSchema = personBatch
+    ? itemSchema
+    : itemSchema.omit({ personAssessments: true });
+  return z.object({ items: z.array(outputItemSchema) }).strict().superRefine((answer, ctx) => {
     const seen = new Set<string>();
     for (const [index, item] of answer.items.entries()) {
       const scope = items.find(s => s.itemKey === item.itemKey);
@@ -86,12 +90,12 @@ function batchSchemaFor(context: unknown) {
       if (!scope || seen.has(item.itemKey)) { fail("itemKey", "Unknown or duplicate itemKey"); continue; }
       seen.add(item.itemKey);
       if (personBatch) {
-        const assessments = item.personAssessments ?? [];
-        if (assessments.length !== scope.allowedIds.length ||
-            new Set(assessments.map(a => a.candidateId)).size !== scope.allowedIds.length ||
-            assessments.some(a => !scope.allowedIds.includes(a.candidateId)))
+        const personAssessments = (item as { personAssessments?: z.infer<typeof assessments> }).personAssessments ?? [];
+        if (personAssessments.length !== scope.allowedIds.length ||
+            new Set(personAssessments.map(a => a.candidateId)).size !== scope.allowedIds.length ||
+            personAssessments.some(a => !scope.allowedIds.includes(a.candidateId)))
           fail("personAssessments", "Assess every candidate in this item exactly once");
-        if (item.verdict === "distinct" && assessments.some(a => a.samePersonPlausibility !== "low"))
+        if (item.verdict === "distinct" && personAssessments.some(a => a.samePersonPlausibility !== "low"))
           fail("personAssessments", "Distinct must exclude every candidate");
       }
       if (item.evidenceRefs.some(ref => !scope.evidence.some(e => e.key === ref)))
