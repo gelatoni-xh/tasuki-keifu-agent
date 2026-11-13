@@ -320,9 +320,15 @@ export function createResearcher(config: ResearchConfig): Researcher {
           else collect(x);
         }
       }
+      // Only tool-returned sources/citations can back an online conclusion.
       collect(data.output);
+      if (request.kind === "organization_identity" && request.allowNetwork === true &&
+          answer.verdict !== "unresolved" && !(data.output ?? []).some((o: { type?: string }) => o.type === "web_search_call"))
+        return stop("research_has_no_verified_source_reference", metrics);
+      if (request.kind === "organization_identity" && !["match", "distinct", "unresolved"].includes(answer.verdict))
+        return stop("semantic_match_cannot_authorize_merge_or_split", metrics);
       let evidence: Evidence[] = answer.evidence
-        .filter((e) => allowedUrls.has(e.url))
+        .filter((e) => allowedUrls.has(e.url) && e.quote.trim().length > 0)
         .map((e) => ({ ...e, fetchedAt: new Date().toISOString() }));
       if (request.allowNetwork === false) {
         if (!["match", "distinct", "unresolved"].includes(answer.verdict))

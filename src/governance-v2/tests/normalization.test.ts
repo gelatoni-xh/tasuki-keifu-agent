@@ -327,6 +327,32 @@ test("unresolved organization suspends all dependent matches even without canoni
   assert.equal(result.resolution.metrics.normalizationSummary?.affectedPeople, 2);
 });
 
+test("unique weak organization candidate gets single-entity search before one dependent reassessment; checkpoint does not repeat search", async () => {
+  const data = input(), ctx = context(), calls: ResearchRequest[] = [], saver = new MemorySaver();
+  data.organizations[0].name = "試験第1高校";
+  const research: Researcher = async (r,m) => {
+    calls.push(r);
+    if (r.kind === "normalization_light" && r.subjectRef === "organization") return { batchAnswer: { items: items(r).map(i => ({ itemKey: i.itemKey, verdict: "unresolved", targetId: null, evidenceRefs: [], reason: "唯一弱候选仍不足" })) }, evidence: [] };
+    if (r.kind === "organization_identity") {
+      assert.equal(r.allowNetwork, true);
+      assert.deepEqual(r.allowedIds, ["o1"]);
+      assert.ok(!JSON.stringify(r.context).includes("personMap"));
+      return { answer: { verdict: "match", targetId: "o1", duplicateIds: [], reason: "官网校名", evidence: [{ url: "https://school.example/about", quote: "試験第1高校" }], corrections: [], split: null }, evidence: [{ url: "https://school.example/about", quote: "試験第1高校" }] };
+    }
+    return match(r,m);
+  };
+  const config = { configurable: { thread_id: "organization-search" }, interruptAfter: ["organization_network_research" as const] };
+  const graph = buildBatchGraph({ loadContext: async () => ctx, research, checkpointer: saver });
+  await graph.invoke({ batchId: "b", input: data, mode: "dry_run" }, config);
+  const result = await graph.invoke(null, { configurable: config.configurable });
+  assert.equal(calls.filter(r => r.kind === "organization_identity").length, 1);
+  assert.equal(calls.filter(r => r.subjectRef === "affected_person_reassessment").length, 1);
+  assert.equal(result.resolution.organizationMap.o, "o1");
+  assert.deepEqual(result.resolution.personMap, { a: "pa", b: "pb" });
+  assert.deepEqual(result.normalization.pendingOrganizationKeys, []);
+  assert.equal(result.resolution.metrics.normalizationStages?.find(s => s.stage === "organization_network_research")?.resolvedCount, 1);
+});
+
 test("cross-check removes unrelated known evidence and keeps unsupported references blocking", async () => {
   const { initialNormalization, validateCrossCheck } = await import("../normalization.js");
   const data = input(), state = initialNormalization();

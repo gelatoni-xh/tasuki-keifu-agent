@@ -261,6 +261,52 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
   stage(resolution.metrics, "organization_adjudication", requests.length, changed.length, started);
   return next;
 }
+// One entity per request, before the single bounded person reassessment. No back edge.
+export async function researchOrganizations(input: BatchInput, ctx: Context, state: NormalizationState,
+  resolution: Resolution, research: Researcher): Promise<NormalizationState> {
+  const next = clone(state), started = Date.now();
+  let count = 0, resolved = 0;
+  for (const key of state.pendingOrganizationKeys ?? []) {
+    const org = input.organizations.find(o => o.key === key)!;
+    const saved = state.requests[`organization_identity:${key}`];
+    const candidates = ctx.organizations.filter(o => saved?.allowedIds.includes(o.id));
+    const request: ResearchRequest = {
+      kind: "organization_identity", subjectRef: key, allowNetwork: true,
+      question: "联网核验单个来源组织的真实身份及其与候选组织的关系。优先学校/组织官网、赛事官方名录。结合赛事日期，引用搜索工具返回的URL和支持结论的原文。不可用暂定选手同人结论证明组织相同。只能match已有候选ID、distinct或unresolved；不得合并、拆分、编造ID或推断Membership。无可靠证据则unresolved。",
+      context: { organization: org, candidates, event: { raceSlug: input.raceSlug, raceDate: ctx.raceDate },
+        conflicts: state.issues.filter(i => i.organizationKey === key).map(i => ({ issueType: i.issueType, reason: i.reason })) },
+      allowedIds: candidates.map(o => o.id),
+    };
+    const outcome = await research(request, resolution.metrics); count++;
+    (resolution.metrics.organizationResearch ??= []).push({ subjectRef: key, candidateCount: candidates.length,
+      eligibility: state.issues.some(i => i.organizationKey === key && i.suggestedAction !== "keep") ? "cross_check_conflict" : "unresolved_light",
+      result: outcome.answer?.verdict ?? outcome.stopReason ?? "missing_answer" });
+    if (!outcome.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large", "research_has_no_verified_source_reference"].includes(outcome.stopReason ?? ""))
+      throw new Error(`Organization research model failure: ${outcome.stopReason ?? "missing_answer"}`);
+    if (outcome.answer && !["match", "distinct", "unresolved"].includes(outcome.answer.verdict))
+      throw new Error("Organization research cannot authorize merge/split");
+    if (outcome.answer?.verdict === "match" && (!outcome.answer.targetId || !request.allowedIds.includes(outcome.answer.targetId)))
+      throw new Error("Organization research returned foreign target");
+    if (outcome.answer && outcome.answer.verdict !== "unresolved" && !outcome.evidence.some(e => e.url && e.quote))
+      throw new Error("Organization research missing URL/quote evidence");
+    next.requests[`organization_identity:${key}`] = saved ?? request;
+    next.decisions[`organization_identity:${key}`] = outcome;
+    if (outcome.answer && ["match", "distinct"].includes(outcome.answer.verdict)) {
+      resolved++;
+      next.pendingOrganizationKeys = next.pendingOrganizationKeys?.filter(k => k !== key);
+      (next.confirmedOrganizationKeys ??= []).push(key);
+      if (outcome.answer.verdict === "match") next.organizationOverrides[key] = outcome.answer.targetId!;
+      const affected = input.rows.filter(row => row.organizationKey === key).map(row => row.key);
+      next.affectedPersonKeys = [...new Set([...next.affectedPersonKeys, ...affected])];
+      for (const personKey of affected) {
+        delete next.decisions[`person_identity:${personKey}`];
+        delete next.requests[`person_identity:${personKey}`];
+      }
+    }
+  }
+  stage(resolution.metrics, "organization_network_research", count, resolved, started);
+  return next;
+}
 export async function reassess(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
   const next = clone(state), started = Date.now();
