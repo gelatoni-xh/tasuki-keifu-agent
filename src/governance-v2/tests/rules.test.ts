@@ -328,12 +328,13 @@ test("batch mail uses natural language and does not claim dry run repairs", asyn
   const body = batchReportText({
     taskId: "t",
     mode: "dry_run",
-    summary: { importedRows: 0, repairs: 0, plannedRepairs: 2, unresolved: 1 },
+    summary: { plannedRows: 44, importedRows: 0, repairs: 0, plannedRepairs: 2, unresolved: 1 },
     unresolved: [
       { subjectRef: "選手", reason: "官方资料不足，保留独立来源档案" },
     ],
   });
   assert.match(body, /修复 0 项/);
+  assert.match(body, /输入 44 条/);
   assert.match(body, /计划修复 2 项/);
   assert.match(body, /官方资料不足/);
   assert.doesNotMatch(body, /"subjectRef"/);

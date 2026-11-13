@@ -346,6 +346,13 @@ test("payload tampering is detected before governance", async () => {
     ).rows[0].n,
     1,
   );
+  const alert = (
+    await pool.query(
+      `SELECT payload FROM governance."NotificationDelivery" WHERE kind='batch_alert'`,
+    )
+  ).rows[0].payload as { summary?: { plannedRows?: number }; batchId?: string };
+  assert.equal(alert.summary?.plannedRows, 1);
+  assert.equal(alert.batchId, (await db.batches(id))[0].id);
 });
 
 test("identity unresolved still imports all rows and emits a batch alert", async () => {
