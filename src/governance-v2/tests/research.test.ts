@@ -46,6 +46,46 @@ test("cross-check wire schema permits source row keys and rejects person entity 
     assert.equal(metrics.researchCalls?.[0].diagnostic?.phase, "output_schema");
   } finally { globalThis.fetch = original; }
 });
+test("organization batch strict schema omits person-only assessments while person batches require them", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  try {
+    for (const kind of ["normalization_light", "organization_adjudication"] as const) {
+      globalThis.fetch = async (_url, init) => {
+        calls++;
+        const body = JSON.parse(String(init?.body));
+        const itemSchema = body.text.format.schema.properties.items.items;
+        assert.deepEqual(itemSchema.required, ["itemKey", "verdict", "targetId", "evidenceRefs", "reason"]);
+        assert.equal("personAssessments" in itemSchema.properties, false);
+        const item = { itemKey: "organization_identity:club", verdict: "unresolved", targetId: null,
+          evidenceRefs: ["source:club"], reason: "组织名无独立对应依据" };
+        return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: [item] }) }] }] }));
+      };
+      const result = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })({
+        ...request, kind, context: { items: [{ itemKey: "organization_identity:club", allowedIds: ["org"], evidence: [{ key: "source:club" }] }] },
+      }, emptyMetrics());
+      assert.equal(result.batchAnswer?.items[0].verdict, "unresolved", kind);
+    }
+    assert.equal(calls, 2);
+
+    globalThis.fetch = async (_url, init) => {
+      calls++;
+      const body = JSON.parse(String(init?.body));
+      const itemSchema = body.text.format.schema.properties.items.items;
+      assert.equal(itemSchema.required.includes("personAssessments"), true);
+      assert.equal("personAssessments" in itemSchema.properties, true);
+      return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: [{
+        itemKey: "person_identity:runner", verdict: "unresolved", targetId: null, evidenceRefs: ["source:runner"], reason: "身份待核",
+        personAssessments: [{ candidateId: "p", nameRelation: "unclear", samePersonPlausibility: "low", reason: "没有可比资料" }],
+      }] }) }] }] }));
+    };
+    const personResult = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })({
+      ...request, kind: "normalization_light", context: { items: [{ itemKey: "person_identity:runner", allowedIds: ["p"], evidence: [{ key: "source:runner" }] }] },
+    }, emptyMetrics());
+    assert.equal(personResult.batchAnswer?.items[0].personAssessments?.length, 1);
+    assert.equal(calls, 3);
+  } finally { globalThis.fetch = original; }
+});
 test("research validates citations and structured output and stops at request budget", async () => {
   const original = globalThis.fetch;
   let calls = 0;
