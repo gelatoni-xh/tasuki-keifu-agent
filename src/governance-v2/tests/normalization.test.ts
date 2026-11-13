@@ -143,7 +143,7 @@ test("another candidate's evidence downgrades only that item and reaches cross-c
   assert.ok(crossChecked);
   assert.notEqual(result.resolution.personMap.a, "pa");
   assert.equal(result.resolution.personMap.b, "pb");
-  assert.equal(result.normalization.decisions["person_identity:a"].answer.verdict, "unresolved");
+  assert.equal(result.normalization.decisions["person_identity:a"].answer?.verdict, "unresolved");
 });
 
 test("source-only or absent person citations retain valid peers without retrying or heavy research", async () => {
@@ -163,7 +163,8 @@ test("source-only or absent person citations retain valid peers without retrying
     assert.deepEqual(calls, ["normalization_light", "normalization_cross_check"]);
     assert.equal(result.resolution.personMap.b, "pb");
     assert.notEqual(result.resolution.personMap.a, "pa");
-    const warning = result.resolution.metrics.normalizationWarnings[0];
+    const warning = result.resolution.metrics.normalizationWarnings?.[0];
+    assert.ok(warning);
     assert.equal(warning.code, "person_match_missing_independent_evidence");
     assert.equal(warning.ignoredTargetId, "pa");
     assert.deepEqual(warning.evidenceRefs, evidenceRefs);
@@ -255,7 +256,7 @@ test("historical DNS entry with exact name, kana and organization resolves by ru
   const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: data, mode: "dry_run" });
   assert.ok(checked);
   assert.equal(result.resolution.personMap.a, "pa");
-  assert.deepEqual(result.resolution.metrics.normalizationRuleMatches[0].weakerCandidateIds, ["homophone"]);
+  assert.deepEqual(result.resolution.metrics.normalizationRuleMatches?.[0].weakerCandidateIds, ["homophone"]);
   const refs = result.plan.changes.filter(c => c.operation.kind === "source_mapping" && c.operation.targetId === "pa");
   assert.ok(refs.some(c => c.evidence.some(e => e.sourceKey === "result:ha")));
   assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
