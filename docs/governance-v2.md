@@ -159,3 +159,24 @@ organizationResearch 逐对象记录候选数、进入原因及结果，normaliz
 同音只是召回线索，不同所属不能单独排除转校。汉字差异大且无其他关联可以解释排除；只差一同音字或疑似 OCR/误录需指出具体疑点，不能仅按相同字数匹配。match 仍需独立身份依据，distinct 须能排除所有候选；unresolved 中存在中高可能性候选时，即使只有一个候选也可进入重型。全低可能性不再因人数多自动联网；生日冲突和实质交叉冲突保留升级入口。旧结果缺少评估时沿用原人数兜底，新生产响应必填。
 
 逐候选解释随 decision 传给交叉及重型，明确它是待验证假设而非独立证据。`personIdentityTriage`、`personResearchRouting` 保留每项判断及研究进入/跳过原因。策略为 `whole-group-cross-check/8`，保留历史尝试；本次未重跑赛事，真实效果待观测。
+
+
+### 统一模型 API 错误诊断（2026-11-13，Issue #26）
+
+问题与 case：第333回日体大记录会·男子5000m第3组，task `616889d3-4486-452c-85f1-6466bf2d2d2e` 在组织轻量节点先收到 HTTP 200 / response.failed，后收到 HTTP 400，共4次物理请求、未落库。原实现丢弃了 HTTP 错误正文和 SSE 嵌套错误，根因无法确认，不能认定输入过大；已丢弃的历史详情无法追补。
+
+产品要求：六类 LLM 请求统一记录可解释的错误及关联标识，区分 HTTP 拒绝、流式失败/未完成、网络/超时、JSON/schema/引用错误。上游未返回 ID 或用量时明确缺失，不把零 tokens 当作免费；日志脱敏并限长，不保存完整提示词、模型输出或认证头。
+
+技术实现：每次物理请求生成 UUID，通过 `X-Client-Request-Id` 发送，关联 console 的 `governance_research_request` / `governance_research_call`；`researchCalls` 经现有 `modelJournal` 持久化并关联 callId/stage。保留 startedAt、endpoint（去凭据及 query）、阶段/项数、是否启用搜索、实际请求 UTF-8 字节数及 SHA256、timeoutMs、headersReceivedMs、独立 httpStatus 和 usageReported。客户端 ID、上游请求 ID 与 response ID 是不同标识，中转不一定支持按客户端 ID 检索。
+
+HTTP 非成功响应限读32 KiB，只提取 error.code/type/param/message、request_id，兼容 One API 的 message/msg/err/error_msg/header.message/response.error.message。HTML 保留标题或去标签摘要，文本摘要限1500字符；记录正文类型、读取字节数、截断及读取异常，正文读取失败保留原 HTTP 状态。响应头仅保留请求/网关追踪标识、Retry-After、限流、content-type/server。替换配置密钥、常见 token/认证字段及 URL 凭据/query，不保存完整正文。
+
+SSE 从 response.created 等事件即提取响应 ID；error/response.failed/response.incomplete 保存事件、序号、嵌套错误和 incomplete_details.reason。读取异常与缺少完成事件仍拒绝业务决策。失败/未完成事件可得的 usage 按最新快照每次物理请求计一次；缺失用量为未知，失败请求费用不声明完整。原预算、有限重试和业务规则保持；记录 Retry-After，本次不改变退避策略。不需要数据库迁移。
+
+验证与效果：模拟错误响应覆盖 HTTP、SSE、HTML/空/过大/读取失败正文、敏感信息脱敏及失败用量；隔离数据库检查原有持久化/恢复流程。此次不调用真实模型、不重跑赛事。测试通过只能证明采集功能，不代表原 API 故障已修复，真实根因及中转兼容性待下一次受控运行观察。文档只保存在本地，不发布站点。
+
+参考：
+
+- [One API 错误处理源码](https://github.com/songquanpeng/one-api/blob/8df4a2670b98266bd287c698243fff327d9748cf/relay/controller/error.go)
+- [官方 Responses 流式事件协议](https://developers.openai.com/api/reference/resources/responses/streaming-events/)
+- xcode.best 访问返回 HTTP 403，未能确认其私有扩展；不假定它与开源 One API 版本完全相同。

@@ -14,7 +14,7 @@ import {
 import { DirectoryPayloadStore } from "../storage.js";
 import { EventRunner } from "../runner.js";
 import type { Researcher } from "../research.js";
-import { CONTRACT_VERSION, manifestSchema } from "../contracts.js";
+import { CONTRACT_VERSION, manifestSchema, type Metrics } from "../contracts.js";
 import { deliverNotifications, enqueueReport } from "../notifications.js";
 
 const url = process.env.GOVERNANCE_TEST_DATABASE_URL;
@@ -656,6 +656,20 @@ test("exhausted LLM retries stay journaled across task recovery and retain separ
     assert.equal(failureReport.observability.llmCalls, 3);
     assert.equal(failureReport.observability.llmRetryCount, 2);
     assert.equal(failureReport.observability.llmRetryExhaustedCount, 1);
+    const journals = (await pool.query(`SELECT a.metrics->'modelJournal' AS journal
+      FROM governance."BatchAttempt" a JOIN governance."GovernanceBatch" b ON b.id=a."batchId" WHERE b."eventTaskId"=$1`, [id])).rows;
+    const persistedCalls = journals.flatMap(row => Object.values(row.journal ?? {})
+      .flatMap(entry => (entry as { metrics: Metrics }).metrics.researchCalls ?? []));
+    assert.equal(persistedCalls.length, 3);
+    assert.equal(new Set(persistedCalls.map(call => call.clientRequestId)).size, 3);
+    for (const call of persistedCalls) {
+      assert.equal(call.httpStatus, 503);
+      assert.equal(call.diagnostic?.upstream?.message, "temporary failure");
+      assert.equal(call.diagnostic?.bodyFormat, "text");
+      assert.equal(call.usageReported, false);
+      assert.ok((call.requestBytes ?? 0) > 0);
+      assert.match(call.requestFingerprint ?? "", /^[a-f0-9]{64}$/);
+    }
     await db.retry(id);
     await assert.rejects(new EventRunner(db, store, saver, options).run(id), /research_http_503/);
     assert.equal(calls, 3, "Recovery must not reset the exhausted model retry allowance");
