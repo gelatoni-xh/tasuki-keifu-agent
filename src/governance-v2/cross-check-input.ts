@@ -16,7 +16,8 @@ export function buildCrossCheckInput(input: BatchInput, ctx: Context,
     if (d?.answer?.targetId) ids.add(d.answer.targetId);
     return { itemKey: `${r.kind}:${r.subjectRef}`, candidateIds: [...new Set(r.allowedIds)],
       verdict: d?.answer?.verdict ?? "pending", targetId: d?.answer?.targetId ?? null,
-      reason: d?.answer?.reason, evidence: d?.evidence ?? [], stopReason: d?.stopReason };
+      reason: d?.answer?.reason, personAssessments: d?.personAssessments,
+      evidence: d?.evidence ?? [], stopReason: d?.stopReason };
   });
   const rows = input.rows.map(row => {
     const names = [row.name, row.kana, row.roman].filter((n): n is string => !!n).map(normalizeName);

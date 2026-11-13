@@ -323,8 +323,10 @@ test("light batch retries fabricated and foreign-item evidence, then accepts the
     assert.deepEqual(body.text.format.schema.properties.items.items.properties.itemKey.enum, ["person_identity:2021", "person_identity:2103"]);
     const result = { items: [
       { itemKey: "person_identity:2021", verdict: "unresolved", targetId: null,
+        personAssessments: [{ candidateId: "p", nameRelation: "possible_transcription", samePersonPlausibility: "medium", reason: "同音异字待调查" }],
         evidenceRefs: [calls === 1 ? "result:fabricated" : calls === 2 ? "result:other" : "result:real"], reason: "姓名存在差异" },
-      { itemKey: "person_identity:2103", verdict: "match", targetId: "p2", evidenceRefs: ["result:other"], reason: "独立记录相符" },
+      { itemKey: "person_identity:2103", verdict: "match", targetId: "p2", evidenceRefs: ["result:other"], reason: "独立记录相符",
+        personAssessments: [{ candidateId: "p2", nameRelation: "exact", samePersonPlausibility: "high", reason: "独立历史证据一致" }] },
     ] };
     if (calls > 1) assert.match(body.input[0].content[0].text, /上次响应未通过/);
     return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(result) }] }], usage: { input_tokens: 100, output_tokens: 20 } }));
@@ -346,6 +348,29 @@ test("light batch retries fabricated and foreign-item evidence, then accepts the
   } finally { globalThis.fetch = original; }
 });
 
+test("person triage rejects missing, duplicate, foreign and contradictory candidate assessments", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const scenario of ["missing", "duplicate", "foreign", "contradictory"] as const) {
+      let calls = 0;
+      const assessment = { candidateId: "p", nameRelation: "possible_transcription", samePersonPlausibility: "medium", reason: "姓名仅差一字" };
+      globalThis.fetch = async () => {
+        calls++;
+        const item = { itemKey: "person_identity:r", verdict: scenario === "contradictory" ? "distinct" : "unresolved",
+          targetId: null, evidenceRefs: ["source:r"], reason: "候选比较",
+          ...(scenario === "missing" ? {} : { personAssessments: scenario === "duplicate" ? [assessment, assessment]
+            : [{ ...assessment, candidateId: scenario === "foreign" ? "outside" : "p" }] }) };
+        return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: [item] }) }] }] }));
+      };
+      const outcome = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })({
+        ...request, kind: "normalization_light", context: { items: [{ itemKey: "person_identity:r", allowedIds: ["p"], evidence: [{ key: "source:r" }] }] },
+      }, emptyMetrics());
+      assert.equal(outcome.stopReason, "research_unusable_response", scenario);
+      assert.equal(outcome.retryExhausted, true);
+      assert.equal(calls, 3);
+    }
+  } finally { globalThis.fetch = original; }
+});
 test("all LLM request kinds retry transient failures within the same finite boundary", async () => {
   const original = globalThis.fetch;
   try {
