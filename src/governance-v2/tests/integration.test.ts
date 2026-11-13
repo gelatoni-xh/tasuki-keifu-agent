@@ -640,3 +640,24 @@ test("model journal survives a crash before lightweight checkpoint commit withou
   assert.equal(report?.observability?.estimatedCostUsd, null);
   assert.equal(report?.importedRows, 0);
 });
+
+test("exhausted LLM retries stay journaled across task recovery and retain separate retry metrics", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response("temporary failure", { status: 503 }); };
+  try {
+    const input = manifest("retry-exhaustion", "dry_run"); input.batches = input.batches.slice(0, 1);
+    const id = await db.submit(input, store);
+    const options = { writeEnabled: false, maxAttempts: 1,
+      research: { apiKey: "test-only", model: "mock", timeoutMs: 1000, maxRequests: 1 } };
+    await assert.rejects(new EventRunner(db, store, saver, options).run(id), /research_http_503/);
+    assert.equal(calls, 3);
+    const failureReport = (await pool.query(`SELECT payload FROM governance."NotificationDelivery" WHERE kind='event_summary'`)).rows[0].payload;
+    assert.equal(failureReport.observability.llmCalls, 3);
+    assert.equal(failureReport.observability.llmRetryCount, 2);
+    assert.equal(failureReport.observability.llmRetryExhaustedCount, 1);
+    await db.retry(id);
+    await assert.rejects(new EventRunner(db, store, saver, options).run(id), /research_http_503/);
+    assert.equal(calls, 3, "Recovery must not reset the exhausted model retry allowance");
+  } finally { globalThis.fetch = original; }
+});

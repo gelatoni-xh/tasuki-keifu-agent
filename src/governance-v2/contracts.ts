@@ -326,6 +326,7 @@ export type Metrics = {
   normalizationRuleMatches?: Array<{ subjectRef: string; targetId: string; rule: string; evidenceRefs: string[]; weakerCandidateIds: string[] }>;
   researchCalls?: Array<{
     callId?: string; stage?: string; itemCount?: number;
+    attemptNo?: number; maxAttempts?: number; retryReason?: string; retryExhausted?: boolean;
     model: string;
     category: string;
     durationMs: number;

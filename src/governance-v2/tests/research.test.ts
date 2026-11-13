@@ -36,7 +36,7 @@ test("cross-check wire schema permits source row keys and rejects person entity 
   try {
     const research = createResearcher({ apiKey: "test-only", model: "configured-model", timeoutMs: 1000, maxRequests: 3 });
     const scoped = { ...request, kind: "normalization_cross_check" as const, context: {
-      rows: [{ key: "1765", provisionalPersonId: "gov_person" }], organizations: [{ key: "school" }],
+      rows: [{ key: "1765", organizationKey: "school", provisionalPersonId: "gov_person" }], organizations: [{ key: "school" }],
       catalog: { evidence: [{ key: "source:1765" }, { key: "source:school" }] },
     } };
     assert.deepEqual((await research(scoped, emptyMetrics())).crossAnswer?.issues[0].personKeys, ["1765"]);
@@ -307,7 +307,85 @@ test("organization network match requires a search call, tool citation and nonem
       if (variant === "valid") assert.equal(result.answer?.targetId, "p");
       else assert.equal(result.stopReason, variant === "incomplete" ? "research_response_incomplete" : "research_has_no_verified_source_reference");
       assert.equal(metrics.costKnown, false);
-      assert.equal(metrics.inputTokens, 10);
+      assert.equal(metrics.inputTokens, variant === "valid" ? 10 : 30);
     }
+  } finally { globalThis.fetch = original; }
+});
+
+test("light batch retries fabricated and foreign-item evidence, then accepts the complete valid batch", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  const metrics = emptyMetrics();
+  const reservations: boolean[] = [];
+  globalThis.fetch = async (_url, init) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.text.format.schema.properties.items.items.properties.itemKey.enum, ["person_identity:2021", "person_identity:2103"]);
+    const result = { items: [
+      { itemKey: "person_identity:2021", verdict: "unresolved", targetId: null,
+        evidenceRefs: [calls === 1 ? "result:fabricated" : calls === 2 ? "result:other" : "result:real"], reason: "姓名存在差异" },
+      { itemKey: "person_identity:2103", verdict: "match", targetId: "p2", evidenceRefs: ["result:other"], reason: "独立记录相符" },
+    ] };
+    if (calls > 1) assert.match(body.input[0].content[0].text, /上次响应未通过/);
+    return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(result) }] }], usage: { input_tokens: 100, output_tokens: 20 } }));
+  };
+  try {
+    const research = createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000,
+      reserve: async (_kind, retry) => { reservations.push(!!retry); return true; } });
+    const result = await research({ ...request, kind: "normalization_light", allowNetwork: false, context: { items: [
+      { itemKey: "person_identity:2021", allowedIds: ["p"], evidence: [{ key: "result:real" }] },
+      { itemKey: "person_identity:2103", allowedIds: ["p2"], evidence: [{ key: "result:other" }] },
+    ] } }, metrics);
+    assert.equal(result.batchAnswer?.items.length, 2);
+    assert.equal(calls, 3);
+    assert.equal(metrics.inputTokens, 300);
+    assert.equal(metrics.outputTokens, 60);
+    assert.deepEqual(reservations, [false, true, true]);
+    assert.deepEqual(metrics.researchCalls?.map(c => c.attemptNo), [1, 2, 3]);
+    assert.equal(metrics.researchCalls?.[1].diagnostic?.issues?.[0].path.join("."), "items.0.evidenceRefs");
+  } finally { globalThis.fetch = original; }
+});
+
+test("all LLM request kinds retry transient failures within the same finite boundary", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const kind of ["normalization_light", "normalization_cross_check", "organization_adjudication", "person_identity", "organization_identity", "membership_conflict"] as const) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        if (calls === 1) throw new DOMException("timeout", "TimeoutError");
+        if (calls === 2) return new Response("temporary", { status: 503 });
+        const value = kind === "normalization_cross_check" ? { issues: [] }
+          : ["normalization_light", "organization_adjudication"].includes(kind) ? { items: [] }
+          : { ...answer, verdict: "unresolved", targetId: null, evidence: [] };
+        return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify(value) }] }] }));
+      };
+      const metrics = emptyMetrics();
+      const result = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })({ ...request, kind, context: { items: [] } }, metrics);
+      assert.equal(result.stopReason, undefined, kind);
+      assert.equal(calls, 3, kind);
+      assert.equal(metrics.llmCalls, 3);
+      assert.match(metrics.researchCalls![1].retryReason!, /request_timeout/);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test("permanent API failures and valid unresolved do not retry; transient exhaustion is explicit", async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const status of [400, 401, 403, 429, 500]) {
+      let calls = 0;
+      globalThis.fetch = async () => { calls++; return new Response("error", { status }); };
+      const metrics = emptyMetrics();
+      const result = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })(request, metrics);
+      assert.equal(calls, status < 429 ? 1 : 3);
+      assert.equal(result.retryExhausted === true, status >= 429);
+      assert.equal(metrics.researchCalls?.at(-1)?.retryExhausted === true, status >= 429);
+    }
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ ...answer, verdict: "unresolved", targetId: null, evidence: [] }) }] }] })); };
+    const result = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 1, timeoutMs: 1000 })(request, emptyMetrics());
+    assert.equal(calls, 1);
+    assert.equal(result.answer?.verdict, "unresolved");
   } finally { globalThis.fetch = original; }
 });

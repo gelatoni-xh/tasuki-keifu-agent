@@ -122,15 +122,16 @@ export class EventRunner {
     let fresh = false;
     for (let n = 0; n < (this.options.maxAttempts ?? 3); n++) {
       const attempt = await this.db.attempt(task, batch, fresh);
-      const reserve = async (kind: import("./research.js").ResearchRequest["kind"]) =>
+      const reserve = async (kind: import("./research.js").ResearchRequest["kind"], retry = false) =>
         this.db.fenced(task, async (c) => {
           const normalization = kind.startsWith("normalization_") || kind === "organization_adjudication";
-          const field = normalization ? "normalizationReservations" : "researchReservations";
+          const field = retry ? (normalization ? "normalizationRetryReservations" : "researchRetryReservations")
+            : normalization ? "normalizationReservations" : "researchReservations";
           const used = (await c.query(
             `SELECT COALESCE(sum(COALESCE((metrics->>$2)::int,0)),0)::int AS n FROM governance."BatchAttempt" WHERE "batchId"=$1`,
             [batch.id, field],
           )).rows[0].n;
-          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3)) return false;
+          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3) * (retry ? 2 : 1)) return false;
           await c.query(
             `UPDATE governance."BatchAttempt" SET metrics=jsonb_set(COALESCE(metrics,'{}'::jsonb),ARRAY[$2::text],to_jsonb(COALESCE((metrics->>$2)::int,0)+1)) WHERE id=$1`,
             [attempt.id, field],
@@ -358,7 +359,7 @@ export class EventRunner {
         acc.agentDurationMs += Number(metrics.durationMs ?? 0);
         return acc;
       },
-      { costKnown: true, llmCalls: 0, networkCalls: 0, ruleDecisions: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, llmModels: [] as string[], agentExecutions: 0, agentDurationMs: 0, modelUsage: new Map<string, { calls: number; inputTokens: number; outputTokens: number }>() },
+      { llmRetryCount: 0, llmRetryExhaustedCount: 0, costKnown: true, llmCalls: 0, networkCalls: 0, ruleDecisions: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, llmModels: [] as string[], agentExecutions: 0, agentDurationMs: 0, modelUsage: new Map<string, { calls: number; inputTokens: number; outputTokens: number }>() },
     );
     const addMetrics = (metrics: Record<string, unknown>) => {
       observability.llmCalls += Number(metrics.llmCalls ?? 0);
@@ -389,6 +390,8 @@ export class EventRunner {
             if (!call || typeof call !== "object") continue;
             const item = call as Record<string, unknown>;
             if (typeof item.model !== "string") continue;
+            if (Number(item.attemptNo ?? 1) > 1) observability.llmRetryCount++;
+            if (item.retryExhausted === true) observability.llmRetryExhaustedCount++;
             const usage = observability.modelUsage.get(item.model) ?? { calls: 0, inputTokens: 0, outputTokens: 0 };
             usage.calls++;
             usage.inputTokens += Number(item.inputTokens ?? 0);
@@ -404,6 +407,8 @@ export class EventRunner {
         if (!call || typeof call !== "object") continue;
         const item = call as Record<string, unknown>;
         if (typeof item.model !== "string") continue;
+        if (Number(item.attemptNo ?? 1) > 1) observability.llmRetryCount++;
+        if (item.retryExhausted === true) observability.llmRetryExhaustedCount++;
         const usage = observability.modelUsage.get(item.model) ?? { calls: 0, inputTokens: 0, outputTokens: 0 };
         usage.calls++;
         usage.inputTokens += Number(item.inputTokens ?? 0);
@@ -430,6 +435,8 @@ export class EventRunner {
       unresolvedDetails: findings,
       observability: {
         llmCalls: observability.llmCalls,
+        llmRetryCount: observability.llmRetryCount,
+        llmRetryExhaustedCount: observability.llmRetryExhaustedCount,
         networkCalls: observability.networkCalls,
         ruleDecisions: observability.ruleDecisions,
         inputTokens: observability.inputTokens,
