@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import type { Change, Operation, Plan } from "./contracts.js";
+import { RULE_VERSION, type Change, type Operation, type Plan } from "./contracts.js";
 import { GovernanceDB, iso, StalePlanError, type Task } from "./database.js";
 import { markMillis, normalizeName, stableId } from "./rules.js";
 
@@ -418,7 +418,7 @@ export class BusinessWriter {
         {
           idempotencyKey: change.idempotencyKey,
           evidence: change.evidence,
-          ruleVersion: "2026-11-11.1",
+          ruleVersion: RULE_VERSION,
         },
       ],
     );

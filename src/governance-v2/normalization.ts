@@ -6,7 +6,7 @@ import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
 import { normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/3";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/4";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
@@ -39,6 +39,7 @@ export async function projectNormalization(batchId: string, input: BatchInput, c
     const decision = Object.values(state.decisions).find(d => d.answer?.verdict === "match" && d.answer.targetId === op.targetId);
     if (decision?.answer) { change.reason += `；${decision.answer.reason}`; change.evidence = decision.evidence; }
   }
+  if (people) metrics.normalizationRuleMatches = result.metrics.normalizationRuleMatches;
   result.metrics = metrics;
   result.metrics.normalizationPolicyVersion = NORMALIZATION_POLICY_VERSION;
   return result;
@@ -87,21 +88,31 @@ function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx
     if (!scope || seen.has(item.itemKey) ||
       (item.verdict === "match" ? !item.targetId || !scope.allowedIds.includes(item.targetId) : item.targetId !== null) ||
       item.evidenceRefs.some(ref => !scope.evidence.some(e => e.key === ref)) ||
-      (item.verdict !== "unresolved" && !item.evidenceRefs.length))
+      (item.verdict === "distinct" && !item.evidenceRefs.length))
       throw new Error("Invalid normalization batch scope/evidence");
     if (item.verdict === "match") {
       const request = requests.find(r => keyOf(r) === item.itemKey)!;
       const context = request.context as { row?: { birthDate?: string }; candidates?: Array<{ id: string; birthDate?: string }> };
       const candidate = context.candidates?.find(c => c.id === item.targetId);
+      if (context.row?.birthDate && candidate?.birthDate && context.row.birthDate !== candidate.birthDate)
+        throw new Error("Normalization match contradicts explicit birth date");
       if (request.kind === "person_identity" &&
           !item.evidenceRefs.some(ref =>
             ctx.historicalResults?.some(h => ref === `result:${h.id}` && h.personId === item.targetId) ||
             ctx.memberships.some(m => ref === `membership:${m.id}` && m.personId === item.targetId) ||
             ctx.historicalReferences?.some(h => ref === `reference:${h.id}` && h.personId === item.targetId)) &&
-          !(context.row?.birthDate && candidate?.birthDate === context.row.birthDate))
-        throw new Error("Normalization person match has no independent identity evidence");
-      if (context.row?.birthDate && candidate?.birthDate && context.row.birthDate !== candidate.birthDate)
-        throw new Error("Normalization match contradicts explicit birth date");
+          !(context.row?.birthDate && candidate?.birthDate === context.row.birthDate)) {
+        const reason = "模型匹配未引用该候选人的独立身份依据，保留待复核；原结论不授权匹配。";
+        (metrics && (metrics.normalizationWarnings ??= []))?.push({
+          itemKey: item.itemKey, code: "person_match_missing_independent_evidence",
+          ignoredTargetId: item.targetId!, evidenceRefs: [...item.evidenceRefs], reason: item.reason,
+        });
+        item.verdict = "unresolved";
+        item.targetId = null;
+        item.reason = `${reason} 原因：${item.reason}`;
+      } else if (!item.evidenceRefs.length && request.kind !== "person_identity") {
+        throw new Error("Invalid normalization batch scope/evidence");
+      }
     }
     seen.add(item.itemKey);
   }
@@ -126,7 +137,7 @@ export async function lightBatch(domain: "organization" | "person", state: Norma
   const requests = Object.values(next.requests).filter(r => r.kind === `${domain}_identity`);
   if (requests.length) {
     const outcome = await research({ kind: "normalization_light", subjectRef: domain,
-      question: "整组全量 unresolved，一次逐项判断。仅基于证据匹配普通变体/身份；同名或同所属本身不足以确认同人；不同出生日期不可match；不合并拆分。",
+      question: "整组全量 unresolved，一次逐项判断。仅基于证据匹配普通变体/身份；同名或同所属本身不足以确认同人；person match必须引用属于targetId的result/reference/membership独立证据（显式生日一致除外），不能只引用本次source；DNS报名可作为身份依据但不代表出场；不同出生日期不可match；不合并拆分。",
       context: { items: itemsFor(requests, ctx) }, allowedIds: [], allowNetwork: false,
     }, metrics);
     const items = requireBatch(outcome, requests, ctx, metrics);

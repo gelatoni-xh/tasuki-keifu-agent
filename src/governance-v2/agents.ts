@@ -296,6 +296,7 @@ export async function normalizePeople(
       metrics: {
         ...orgs.metrics,
         stoppedReasons: [...orgs.metrics.stoppedReasons],
+        normalizationRuleMatches: [],
       },
     };
   const stableMatches = new Map<string, string>();
@@ -312,7 +313,7 @@ export async function normalizePeople(
         m.sourceKey === sourceKey,
     )?.personId;
     let candidates = ctx.people.filter((p) =>
-      [p.displayNameJa, ...(p.aliases ?? [])].some((n) =>
+      [p.displayNameJa, p.displayNameKana, ...(p.aliases ?? [])].filter((n): n is string => !!n).some((n) =>
         [row.name, row.kana, row.roman]
           .filter((v): v is string => !!v)
           .some((v) => normalizeName(n) === normalizeName(v)),
@@ -336,9 +337,9 @@ export async function normalizePeople(
         ...row.memberships.map((m) => orgs.organizationMap[m.organizationKey]),
       ].filter((id): id is string => !!id),
     );
-    const contextual = candidates.filter((p) => {
+    const contradictoryCohort = (p: Context["people"][number]) => {
       const memberships = ctx.memberships.filter((m) => m.personId === p.id);
-      const contradictoryCohort = memberships.some((m) => {
+      return memberships.some((m) => {
         if (m.organizationId !== orgId || m.organizationType !== "university")
           return false;
         const hint = row.memberships.find(
@@ -366,16 +367,28 @@ export async function normalizePeople(
               m.endDate < ctx.raceDate))
         );
       });
-      return (
-        !contradictoryCohort &&
-        memberships.some((m) => hintedOrganizations.has(m.organizationId))
-      );
+    };
+    const contextual = candidates.filter(p => !contradictoryCohort(p) &&
+      ctx.memberships.some(m => m.personId === p.id && hintedOrganizations.has(m.organizationId)));
+    // A historical entry is identity evidence even for DNS. It never proves a
+    // start, grade or Membership. Only compare independently canonicalized IDs.
+    const exactNameKana = candidates.filter(p => row.kana && normalizeName(p.displayNameJa) === normalizeName(row.name) &&
+      [p.displayNameKana, ...(p.aliases ?? [])].some(v => !!v && normalizeName(v) === normalizeName(row.kana!)));
+    const historical = (exactNameKana.length === 1 ? exactNameKana : []).flatMap(p => {
+      if (contradictoryCohort(p) || !orgId || !ctx.organizations.some(o => o.id === orgId)) return [];
+      const records = (ctx.historicalResults ?? []).filter(h => h.personId === p.id &&
+        h.organizationId === orgId && h.raceId !== ctx.raceId && !!h.sourceId &&
+        !!h.raceDate && !!ctx.raceDate && h.raceDate <= ctx.raceDate);
+      return records.length ? [{ person: p, records }] : [];
     });
+    const historicalMatch = historical.length === 1 &&
+      contextual.every(p => p.id === historical[0].person.id) ? historical[0] : undefined;
     let confirmedDistinct = false;
     let id =
       mapped ??
       stableMatches.get(sourceKey) ??
-      (contextual.length === 1
+      historicalMatch?.person.id ??
+      (historical.length === 0 && contextual.length === 1
         ? contextual[0].id
         : row.birthDate &&
             candidates.filter((p) => p.birthDate === row.birthDate).length === 1
@@ -389,6 +402,12 @@ export async function normalizePeople(
     )
       id = undefined;
     if (forceReview.has(row.key)) id = undefined;
+    if (id && historicalMatch?.person.id === id && !mapped && !forceReview.has(row.key)) {
+      out.metrics.normalizationRuleMatches!.push({ subjectRef: row.key, targetId: id,
+        rule: "exact_name_kana_historical_organization",
+        evidenceRefs: [`source:${row.key}`, ...historicalMatch.records.map(h => `result:${h.id}`)],
+        weakerCandidateIds: candidates.filter(p => p.id !== id).map(p => p.id) });
+    }
     // Research requires an actual competing attribution, not a mere empty field/name variation.
     if (
       !id &&
@@ -567,6 +586,15 @@ export async function normalizePeople(
           "保存来源身份映射",
         ),
       );
+    const ruleMatch = out.metrics.normalizationRuleMatches!.find(m => m.subjectRef === row.key);
+    if (ruleMatch) {
+      const mapping = out.changes.find(c => c.operation.kind === "source_mapping" &&
+        c.operation.sourceKey === sourceKey && c.operation.targetId === id);
+      if (mapping) {
+        mapping.reason += "；规则：姓名及假名一致，唯一强候选的历史报名所属一致（DNS亦可作为身份依据）";
+        mapping.evidence = ruleMatch.evidenceRefs.map(sourceKey => ({ sourceKey }));
+      }
+    }
   }
   out.metrics.durationMs += Date.now() - started;
   return out;

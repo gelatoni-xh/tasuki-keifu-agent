@@ -123,16 +123,54 @@ test("all unresolved organizations share one request; unchanged adjudication ski
   assert.equal(calls.filter(r => r.subjectRef === "affected_person_reassessment").length, 0);
 });
 
-test("evidence from another candidate cannot confirm identity", async () => {
+test("another candidate's evidence downgrades only that item and reaches cross-check", async () => {
   const ctx = context();
   ctx.people.push({ id: "wrong", slug: "wrong", displayNameJa: "選手a" });
   ctx.historicalResults!.push({ ...ctx.historicalResults![0], id: "wrong-history", personId: "wrong" });
+  let crossChecked = false;
   const research: Researcher = async (r,m) => {
+    if (r.kind === "person_identity") return { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立证据不足", evidence: [], corrections: [], split: null }, evidence: [] };
     const out = await match(r,m);
     if (out.batchAnswer) out.batchAnswer.items[0].evidenceRefs = ["result:wrong-history"];
+    if (r.kind === "normalization_cross_check") {
+      crossChecked = true;
+      const payload = r.context as { validationWarnings: Array<{ code: string }> };
+      assert.equal(payload.validationWarnings[0].code, "person_match_missing_independent_evidence");
+    }
     return out;
   };
-  await assert.rejects(buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: input(), mode: "dry_run" }), /independent identity evidence/);
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: input(), mode: "dry_run" });
+  assert.ok(crossChecked);
+  assert.notEqual(result.resolution.personMap.a, "pa");
+  assert.equal(result.resolution.personMap.b, "pb");
+  assert.equal(result.normalization.decisions["person_identity:a"].answer?.verdict, "unresolved");
+});
+
+test("source-only or absent person citations retain valid peers without retrying or heavy research", async () => {
+  for (const evidenceRefs of [["source:a"], []]) {
+    const calls: string[] = [];
+    let raw: unknown;
+    const research: Researcher = async (r,m) => {
+      calls.push(r.kind);
+      const out = await match(r,m);
+      if (out.batchAnswer) {
+        out.batchAnswer.items[0].evidenceRefs = evidenceRefs;
+        raw = structuredClone(out);
+      }
+      return out;
+    };
+    const result = await buildBatchGraph({ loadContext: async () => context(), research }).invoke({ batchId: "b", input: input(), mode: "dry_run" });
+    assert.deepEqual(calls, ["normalization_light", "normalization_cross_check"]);
+    assert.equal(result.resolution.personMap.b, "pb");
+    assert.notEqual(result.resolution.personMap.a, "pa");
+    const warning = result.resolution.metrics.normalizationWarnings?.[0];
+    assert.ok(warning);
+    assert.equal(warning.code, "person_match_missing_independent_evidence");
+    assert.equal(warning.ignoredTargetId, "pa");
+    assert.deepEqual(warning.evidenceRefs, evidenceRefs);
+    assert.equal((raw as { batchAnswer: { items: Array<{ verdict: string }> } }).batchAnswer.items[0].verdict, "match");
+    assert.ok(result.plan.findings.some(f => f.subjectRef === "a" && f.status === "unresolved"));
+  }
 });
 
 test("explicit birthday conflict cannot be overridden with historical evidence", async () => {
@@ -190,4 +228,70 @@ test("cross-check deduplicates large unrelated catalogs while retaining full gro
   state.crossCheckEvidenceRefs = compact.catalog.evidence.map(e => e.key);
   state.issues = [{ issueKey: "foreign", issueType: "circular_evidence", organizationKey: "o", personKeys: ["row-0"], evidenceRefs: ["membership:not-supplied"], reason: "unsupported", suggestedAction: "unresolved" }];
   assert.throws(() => validateCrossCheck(data, state, ctx), /unsupported/);
+});
+
+function historicalFixture() {
+  const data = input(), ctx = context();
+  data.rows[0].name = "伊藤 亘輝"; data.rows[0].kana = "ｲﾄｳ ｺｳｷ";
+  ctx.people[0].displayNameJa = "伊藤亘輝"; ctx.people[0].displayNameKana = "イトウ コウキ";
+  ctx.historicalResults![0].raceDate = "2026-09-26";
+  ctx.historicalResults![0].sourceId = "official-old";
+  return { data, ctx };
+}
+
+test("historical DNS entry with exact name, kana and organization resolves by rule; retains weaker homophones", async () => {
+  const { data, ctx } = historicalFixture();
+  ctx.people.push({ id: "homophone", slug: "homophone", displayNameJa: "伊藤光輝", displayNameKana: "イトウコウキ" });
+  let checked = false;
+  const research: Researcher = async (r,m) => {
+    if (r.kind === "normalization_light") assert.deepEqual(items(r).map(i => i.itemKey), ["person_identity:b"]);
+    if (r.kind === "normalization_cross_check") {
+      checked = true;
+      const payload = r.context as { rows: Array<{ candidateIds: string[]; identityRule?: { evidenceRefs: string[] } }> };
+      assert.ok(payload.rows[0].candidateIds.includes("homophone"));
+      assert.ok(payload.rows[0].identityRule?.evidenceRefs.includes("result:ha"));
+    }
+    return match(r,m);
+  };
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+  assert.ok(checked);
+  assert.equal(result.resolution.personMap.a, "pa");
+  assert.deepEqual(result.resolution.metrics.normalizationRuleMatches?.[0].weakerCandidateIds, ["homophone"]);
+  const refs = result.plan.changes.filter(c => c.operation.kind === "source_mapping" && c.operation.targetId === "pa");
+  assert.ok(refs.some(c => c.evidence.some(e => e.sourceKey === "result:ha")));
+  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
+  assert.equal(ctx.historicalResults![0].isStarter, false);
+});
+
+test("history rule rejects missing kana, different organization IDs, future/current-race history and untraceable sources", async () => {
+  for (const mutation of ["kana", "org", "future", "race", "source", "duplicate", "cohort"] as const) {
+    const { data, ctx } = historicalFixture();
+    if (mutation === "kana") data.rows[0].kana = undefined;
+    if (mutation === "org") ctx.historicalResults![0].organizationId = "similar-label-different-id";
+    if (mutation === "future") ctx.historicalResults![0].raceDate = "2027-01-01";
+    if (mutation === "race") ctx.historicalResults![0].raceId = ctx.raceId;
+    if (mutation === "source") ctx.historicalResults![0].sourceId = undefined;
+    if (mutation === "duplicate") ctx.people.push({ ...ctx.people[0], id: "other", slug: "other" });
+    if (mutation === "cohort") {
+      data.organizations[0].type = "university"; ctx.organizations[0].type = "university";
+      ctx.memberships.push({ id: "old", personId: "pa", organizationId: "o1", organizationType: "university", type: "enrolled", startDate: "2010-04-01", endDate: "2014-03-31", startBasis: "source", endBasis: "source", endState: "ended" });
+    }
+    const calls: ResearchRequest[] = [];
+    await buildBatchGraph({ loadContext: async () => ctx, research: async (r,m) => { calls.push(r); return match(r,m); } }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+    assert.ok(calls.some(r => r.kind === "normalization_light" && items(r).some(i => i.itemKey === "person_identity:a")), mutation);
+  }
+});
+
+test("cross-check can reject a historical rule match without repeating lightweight or cross-check nodes", async () => {
+  const { data, ctx } = historicalFixture();
+  const calls: ResearchRequest[] = [];
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research: async (r,m) => {
+    calls.push(r);
+    if (r.kind === "normalization_cross_check") return { crossAnswer: { issues: [{ issueKey: "conflict", issueType: "mapping_conflict", organizationKey: "o", personKeys: ["a"], evidenceRefs: ["result:ha"], reason: "发现独立身份矛盾", suggestedAction: "unresolved" }] }, evidence: [] };
+    return match(r,m);
+  } }).invoke({ batchId: "b", input: data, mode: "dry_run" });
+  assert.notEqual(result.resolution.personMap.a, "pa");
+  assert.deepEqual(result.resolution.metrics.normalizationRuleMatches, []);
+  assert.equal(calls.filter(r => r.kind === "normalization_cross_check").length, 1);
+  assert.equal(calls.filter(r => r.kind === "normalization_light").length, 1);
 });
