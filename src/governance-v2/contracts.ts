@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
-export const RULE_VERSION = "2026-11-11.1";
+export const RULE_VERSION = "2026-11-13.1";
 const text = z.string().trim().min(1);
 export const orgTypes = [
   "unknown",
@@ -190,6 +190,7 @@ export type Person = {
   id: string;
   slug: string;
   displayNameJa: string;
+  displayNameKana?: string | null;
   birthDate?: string | null;
   hometown?: string | null;
   updatedAt?: string;
@@ -319,7 +320,8 @@ export type Metrics = {
   normalizationStages?: Array<{ stage: string; inputCount: number; resolvedCount: number; remainingCount: number; durationMs: number }>;
   normalizationPolicyVersion?: string;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
-  normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string }>;
+  normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string; evidenceRefs?: string[]; reason?: string }>;
+  normalizationRuleMatches?: Array<{ subjectRef: string; targetId: string; rule: string; evidenceRefs: string[]; weakerCandidateIds: string[] }>;
   researchCalls?: Array<{
     callId?: string; stage?: string; itemCount?: number;
     model: string;

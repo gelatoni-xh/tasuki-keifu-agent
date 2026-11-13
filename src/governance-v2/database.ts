@@ -3,6 +3,7 @@ import { Pool, types, type PoolClient } from "pg";
 import { basis, fingerprint, normalizeName } from "./rules.js";
 import {
   manifestSchema,
+  RULE_VERSION,
   type Manifest,
   type Context,
   type BatchInput,
@@ -209,7 +210,7 @@ export class GovernanceDB {
             randomUUID(),
             attemptId,
             a.agentKey,
-            "2026-11-11.1",
+            RULE_VERSION,
             a.skipped ? "skipped" : "succeeded",
             { findings: a.findings.length, changes: a.changes.length },
             a.metrics,

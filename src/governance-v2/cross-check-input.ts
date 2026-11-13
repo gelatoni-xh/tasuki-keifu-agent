@@ -20,9 +20,10 @@ export function buildCrossCheckInput(input: BatchInput, ctx: Context,
   });
   const rows = input.rows.map(row => {
     const names = [row.name, row.kana, row.roman].filter((n): n is string => !!n).map(normalizeName);
-    const candidates = ctx.people.filter(p => [p.displayNameJa, ...(p.aliases ?? [])].some(n => names.includes(normalizeName(n))));
+    const candidates = ctx.people.filter(p => [p.displayNameJa, p.displayNameKana, ...(p.aliases ?? [])].some(n => !!n && names.includes(normalizeName(n))));
     candidates.forEach(p => peopleIds.add(p.id));
-    return { ...row, evidenceRef: `source:${row.key}`, provisionalPersonId: resolution.personMap[row.key], candidateIds: candidates.map(p => p.id) };
+    return { ...row, evidenceRef: `source:${row.key}`, provisionalPersonId: resolution.personMap[row.key], candidateIds: candidates.map(p => p.id),
+      identityRule: resolution.metrics.normalizationRuleMatches?.find(m => m.subjectRef === row.key) };
   });
   const organizations = input.organizations.map(org => {
     const name = normalizeName(org.name);
@@ -63,7 +64,7 @@ export function buildCrossCheckInput(input: BatchInput, ctx: Context,
       historyMayBeTruncatedFor: people.filter(p => (ctx.historicalResults?.filter(h => h.personId === p.id).length ?? 0) > 10 ||
         (ctx.historicalReferences?.filter(h => h.personId === p.id).length ?? 0) > 10).map(p => p.id),
     },
-    rows, organizations, items,
+    rows, organizations, items, validationWarnings: resolution.metrics.normalizationWarnings ?? [],
     catalog: { people, organizations: catalogOrganizations, evidence: [...evidence.values()],
       sourceMappings: ctx.sourceMappings.filter(m => (m.personId && peopleIds.has(m.personId)) || (m.organizationId && organizationIds.has(m.organizationId))) },
   };
