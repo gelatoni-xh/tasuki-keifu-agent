@@ -3,15 +3,17 @@ import { emptyMetrics } from "./contracts.js";
 import { normalizeOrganizations, normalizePeople } from "./agents.js";
 import type { Researcher, ResearchOutcome, ResearchRequest } from "./research.js";
 import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
+import { buildCrossCheckInput } from "./cross-check-input.js";
 import { normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/2";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/3";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
   organizationOverrides: Record<string, string>;
   issues: NonNullable<ResearchOutcome["crossAnswer"]>["issues"];
   affectedPersonKeys: string[];
+  crossCheckEvidenceRefs?: string[];
 };
 export const initialNormalization = (): NormalizationState => ({
   requests: {}, decisions: {}, organizationOverrides: {}, issues: [], affectedPersonKeys: [],
@@ -139,13 +141,11 @@ export async function crossCheck(input: BatchInput, ctx: Context, state: Normali
   if (!input.rows.length && !input.organizations.length) {
     stage(resolution.metrics, "normalization_cross_check", 0, 0, started); return next;
   }
+  const context = buildCrossCheckInput(input, ctx, state, resolution);
+  next.crossCheckEvidenceRefs = context.catalog.evidence.map(e => e.key);
   const outcome = await research({ kind: "normalization_cross_check", subjectRef: input.raceSlug,
-    question: "检查暂定组织与人物结论的矛盾/循环证据。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。没有问题返回issues空数组。",
-    context: { organizations: input.organizations, rows: input.rows,
-      organizationMap: resolution.organizationMap, personMap: resolution.personMap,
-      decisions: state.decisions, items: itemsFor(Object.values(state.requests), ctx),
-      organizationEvidence: input.organizations.map(o => ({ key: `source:${o.key}`, input: o, candidates: ctx.organizations })),
-    }, allowedIds: [], allowNetwork: false,
+    question: "检查全组暂定组织与人物结论的矛盾/循环证据。rows/organizations保留全组来源事实；candidateIds及暂定ID引用共享catalog，items是已有判断摘要，不是独立证据。仅引用catalog.evidence中的key。历史仅为已加载子集，注意截断标记；DNS不是出场，普通赛与NCG不可混淆，学校名称不能自动推出年级或Membership。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。没有问题返回issues空数组。",
+    context, allowedIds: [], allowNetwork: false,
   }, resolution.metrics);
   if (!outcome.crossAnswer) {
     if (!["research_budget_exhausted", "research_not_configured"].includes(outcome.stopReason ?? ""))
@@ -158,7 +158,7 @@ export async function crossCheck(input: BatchInput, ctx: Context, state: Normali
 export function validateCrossCheck(input: BatchInput, state: NormalizationState, ctx?: Context): NormalizationState {
   const next = clone(state);
   const seen = new Set<string>();
-  const refs = new Set([
+  const refs = new Set(state.crossCheckEvidenceRefs ?? [
     ...input.organizations.map(o => `source:${o.key}`),
     ...Object.values(state.requests).map(r => `source:${r.subjectRef}`),
     ...(ctx?.historicalResults ?? []).map(h => `result:${h.id}`),
