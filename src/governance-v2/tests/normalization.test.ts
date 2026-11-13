@@ -154,3 +154,40 @@ test("cross-check can invalidate a rule match without looping or inventing membe
   assert.notEqual(result.resolution.personMap.a, "pa");
   assert.ok(result.plan.findings.some(f => f.subjectRef === "a" && f.status === "unresolved"));
 });
+
+test("cross-check deduplicates large unrelated catalogs while retaining full group and conflicting evidence", async () => {
+  const { buildCrossCheckInput } = await import("../cross-check-input.js");
+  const { initialNormalization, validateCrossCheck } = await import("../normalization.js");
+  const { emptyMetrics } = await import("../contracts.js");
+  const data = input(), ctx = context(), state = initialNormalization();
+  data.rows = Array.from({ length: 44 }, (_, i) => ({ ...data.rows[i % 2], key: `row-${i}` }));
+  data.organizations.push({ key: "other", name: "別高校", type: "high_school" });
+  ctx.organizations.push(...Array.from({ length: 3000 }, (_, i) => ({ id: `unrelated-${i}`, slug: `unrelated-${i}`, nameJa: `無関係組織${i}`, type: "high_school" as const })));
+  ctx.people.push({ id: "conflict", slug: "conflict", displayNameJa: "選手a", birthDate: "2000-01-01" });
+  data.rows[0].birthDate = "2001-01-01";
+  ctx.memberships.push({ id: "ma", personId: "pa", organizationId: "o1", type: "enrolled", organizationType: "high_school", startBasis: "unknown", endBasis: "unknown", endState: "unknown" });
+  ctx.memberships.push({ ...ctx.memberships[0], id: "mb", personId: "pb" });
+  ctx.historicalResults!.push({ ...ctx.historicalResults![0], id: "ncg", raceSlug: "ncg-333", raceName: "NCG", isStarter: true });
+  ctx.historicalReferences = Array.from({ length: 11 }, (_, i) => ({ id: `ref-${i}`, personId: "pa", sourceId: "s", sourceKey: `${i}`, entityType: "person" }));
+  state.requests["person_identity:row-0"] = { kind: "person_identity", subjectRef: "row-0", question: "identity", context: {}, allowedIds: ["pa", "conflict"], providedEvidence: [{ sourceId: "s", url: "https://example.com/result" }] };
+  const resolution = { organizationMap: { o: "o1" }, personMap: Object.fromEntries(data.rows.map((r, i) => [r.key, i % 2 ? "pb" : "pa"])), findings: [], changes: [], metrics: emptyMetrics() };
+  const compact = buildCrossCheckInput(data, ctx, state, resolution);
+  const legacy = { rows: data.rows, organizationEvidence: data.organizations.map(o => ({ input: o, candidates: ctx.organizations })) };
+  assert.ok(JSON.stringify(legacy).length > 512000);
+  assert.ok(JSON.stringify(compact).length < 512000);
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(legacy).length / 10);
+  assert.equal(compact.rows.length, 44);
+  assert.equal(compact.organizations.length, 2);
+  assert.ok(compact.rows.every(r => r.notes === "DNS"));
+  assert.ok(compact.catalog.people.some(p => p.id === "conflict"));
+  assert.equal(compact.catalog.organizations.length, 1);
+  assert.equal(compact.catalog.evidence.filter(e => e.key === "membership:ma").length, 1);
+  assert.equal(compact.catalog.evidence.filter(e => e.key === "membership:mb").length, 1); // Rule-selected, no research request.
+  assert.ok(JSON.stringify(compact).includes('"isStarter":false'));
+  assert.ok(JSON.stringify(compact).includes('"raceSlug":"ncg-333"'));
+  assert.ok(JSON.stringify(compact).includes("https://example.com/result"));
+  assert.deepEqual(compact.overview.historyMayBeTruncatedFor, ["pa"]);
+  state.crossCheckEvidenceRefs = compact.catalog.evidence.map(e => e.key);
+  state.issues = [{ issueKey: "foreign", issueType: "circular_evidence", organizationKey: "o", personKeys: ["row-0"], evidenceRefs: ["membership:not-supplied"], reason: "unsupported", suggestedAction: "unresolved" }];
+  assert.throws(() => validateCrossCheck(data, state, ctx), /unsupported/);
+});
