@@ -15,6 +15,8 @@ export type Report = {
   unresolved: number;
   completedBatches: number;
   totalBatches: number;
+  failedBatches?: number;
+  failedRows?: number;
   unresolvedDetails: Array<{
     reason: string;
     subjectRef: string;
@@ -55,6 +57,7 @@ export function reportText(report: Report) {
     `${(report as Report & { eventName?: string }).eventName ?? "赛事"}治理 ${report.status}（${report.mode}）`,
     `任务：${report.taskId}`,
     `批次：${report.completedBatches}/${report.totalBatches}`,
+    ...(report.failedBatches ? [`失败批次：${report.failedBatches}（涉及 ${report.failedRows ?? 0} 条输入）`] : []),
     `导入 ${report.importedRows} 条；计划 ${report.plannedRows} 条；修复 ${report.repairs ?? 0} 项；计划修复 ${report.plannedRepairs ?? 0} 项；unresolved ${report.unresolved} 项。`,
     ...(report.observability
       ? [
@@ -85,7 +88,7 @@ export function batchReportText(payload: {
     `任务：${payload.taskId ?? "未知"}；批次：${payload.batchId ?? "见站点任务记录"}`,
     ...(s
       ? [
-          `导入 ${s.importedRows ?? 0} 条；修复 ${s.repairs ?? 0} 项；计划修复 ${s.plannedRepairs ?? 0} 项；unresolved ${s.unresolved ?? payload.unresolved?.length ?? 0} 项。`,
+          `输入 ${s.plannedRows ?? s.recordCount ?? 0} 条；导入 ${s.importedRows ?? 0} 条；修复 ${s.repairs ?? 0} 项；计划修复 ${s.plannedRepairs ?? 0} 项；unresolved ${s.unresolved ?? payload.unresolved?.length ?? 0} 项。`,
         ]
       : []),
     ...(payload.reason

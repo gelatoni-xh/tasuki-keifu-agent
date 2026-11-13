@@ -346,6 +346,13 @@ test("payload tampering is detected before governance", async () => {
     ).rows[0].n,
     1,
   );
+  const alert = (
+    await pool.query(
+      `SELECT payload FROM governance."NotificationDelivery" WHERE kind='batch_alert'`,
+    )
+  ).rows[0].payload as { summary?: { plannedRows?: number }; batchId?: string };
+  assert.equal(alert.summary?.plannedRows, 1);
+  assert.equal(alert.batchId, (await db.batches(id))[0].id);
 });
 
 test("identity unresolved still imports all rows and emits a batch alert", async () => {
@@ -608,6 +615,9 @@ test("model journal survives a crash before lightweight checkpoint commit withou
   let lightweightCalls = 0;
   const research: Researcher = async (request, metrics) => {
     metrics.llmCalls++;
+    metrics.inputTokens += 100;
+    metrics.outputTokens += 20;
+    metrics.llmModels.push("fixture-model");
     if (request.kind === "normalization_light") { lightweightCalls++; }
     return stagedFixture(async () => ({ answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立证据不足", evidence: [], corrections: [], split: null }, evidence: [] }))(request, metrics);
   };
@@ -615,6 +625,14 @@ test("model journal survives a crash before lightweight checkpoint commit withou
   await assert.rejects(new EventRunner(db, store, saver, { writeEnabled: false,
     researcher: research, maxAttempts: 1, failAfterNode: "person_light_batch" }).run(id), /Injected/);
   assert.equal(lightweightCalls, 1);
+  const failureReport = (await pool.query(
+    `SELECT payload FROM governance."NotificationDelivery" WHERE kind='event_summary'`,
+  )).rows[0].payload;
+  assert.equal(failureReport.failedBatches, 1);
+  assert.equal(failureReport.failedRows, 1);
+  assert.equal(failureReport.observability.llmCalls, 1);
+  assert.equal(failureReport.observability.inputTokens, 100);
+  assert.equal(failureReport.observability.outputTokens, 20);
   await db.retry(id);
   const report = await new EventRunner(db, store, saver, { writeEnabled: false, researcher: research }).run(id);
   assert.equal(lightweightCalls, 1);
