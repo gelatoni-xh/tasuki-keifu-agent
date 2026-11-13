@@ -325,7 +325,7 @@ export class EventRunner {
       done.reduce((n, b) => n + Number(b.summary?.[key] ?? 0), 0);
     const executions = (
       await queryable.query(
-        `SELECT ae.metrics
+        `SELECT ae.metrics,ae."batchAttemptId"
          FROM governance."AgentExecution" ae
          JOIN governance."BatchAttempt" ba ON ba.id=ae."batchAttemptId"
          JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
@@ -335,7 +335,7 @@ export class EventRunner {
     ).rows;
     const failedAttempts = (
       await queryable.query(
-        `SELECT ba.metrics
+        `SELECT ba.id,ba.metrics
          FROM governance."BatchAttempt" ba
          JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
          WHERE gb."eventTaskId"=$1 AND ba.status='failed'`,
@@ -375,7 +375,11 @@ export class EventRunner {
       const metrics = (row.metrics ?? {}) as Record<string, unknown>;
       const journal = metrics.modelJournal;
       if (!journal || typeof journal !== "object") continue;
-      for (const entry of Object.values(journal as Record<string, unknown>)) {
+      const accounted = new Set(executions
+        .filter((execution) => execution.batchAttemptId === row.id)
+        .flatMap((execution) => execution.metrics?.accountedCallIds ?? []));
+      for (const [callId, entry] of Object.entries(journal as Record<string, unknown>)) {
+        if (accounted.has(callId)) continue;
         if (!entry || typeof entry !== "object") continue;
         const entryMetrics = (entry as { metrics?: unknown }).metrics;
         if (entryMetrics && typeof entryMetrics === "object") {
