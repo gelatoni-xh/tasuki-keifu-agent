@@ -265,3 +265,4 @@ test("whole-group schemas disable tools and have a fixed five-call allowance sep
     assert.equal(metrics.costKnown, false);
   } finally { globalThis.fetch = original; }
 });
+

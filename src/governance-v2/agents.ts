@@ -13,6 +13,7 @@ import {
   type Window,
 } from "./contracts.js";
 import {
+  isDnsRow,
   academicWindow,
   adjacentSchoolWindow,
   fillUnknownDates,
@@ -100,6 +101,7 @@ export async function normalizeOrganizations(
   research: Researcher,
   light = false,
   overrides: Record<string, string> = {},
+  forceReview: ReadonlySet<string> = new Set(),
 ): Promise<Resolution> {
   const started = Date.now(),
     out: Resolution = {
@@ -129,11 +131,12 @@ export async function normalizeOrganizations(
         ) &&
         (org.type === "unknown" || o.type === "unknown" || o.type === org.type),
     );
-    let id =
+    let id: string | undefined =
       overrides[org.key] ?? mapped ??
       resolved.get(identity) ??
       (candidates.length === 1 ? candidates[0].id : undefined);
-    if (!id && candidates.length === 0) {
+    if (forceReview.has(org.key)) id = undefined;
+    if (!id && (candidates.length === 0 || forceReview.has(org.key))) {
       const recalled = ctx.organizations.filter(
         (o) =>
           (o.slug === org.slug ||
@@ -408,9 +411,10 @@ export async function normalizePeople(
         evidenceRefs: [`source:${row.key}`, ...historicalMatch.records.map(h => `result:${h.id}`)],
         weakerCandidateIds: candidates.filter(p => p.id !== id).map(p => p.id) });
     }
+    const currentDns = isDnsRow(row);
     // Research requires an actual competing attribution, not a mere empty field/name variation.
     if (
-      !id &&
+      !id && !currentDns &&
       (candidates.length || forceReview.has(row.key)) &&
       (light || contextual.length > 1 ||
         !!mapped ||
@@ -534,7 +538,7 @@ export async function normalizePeople(
         ),
       );
       if (
-        candidates.length &&
+        candidates.length && !currentDns &&
         !confirmedDistinct &&
         !out.findings.some((f) => f.subjectRef === row.key)
       )
@@ -644,8 +648,9 @@ export async function governMemberships(
       ];
     }),
   );
-  const affected = new Set(Object.values(res.personMap));
+  const affected = new Set(input.rows.filter(row => !isDnsRow(row) && !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")).map(row => res.personMap[row.key]));
   for (const row of input.rows) {
+    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     for (const hint of row.memberships) {
       out.metrics.ruleDecisions++;
@@ -767,6 +772,7 @@ export async function governMemberships(
     const r = await research(
       {
         kind: "membership_conflict",
+        allowNetwork: true,
         subjectRef: f.subjectRef,
         question: f.reason,
         context: {
@@ -779,18 +785,21 @@ export async function governMemberships(
       },
       out.metrics,
     );
+    if (!r.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large"].includes(r.stopReason ?? ""))
+      throw new Error(`Membership research model failure: ${r.stopReason ?? "missing_answer"}`);
     if (
       r.answer?.verdict === "correct_membership" &&
       r.answer.corrections.length
     ) {
-      let applied = false;
+      const proposed = new Map(all);
+      let applied = false, invalid = false;
       for (const correction of r.answer.corrections) {
         const m = all.get(correction.membershipId);
-        if (!m || !relevant.some((x) => x.id === m.id)) continue;
+        if (!m || !relevant.some((x) => x.id === m.id)) { invalid = true; break; }
         const start = correction.startDate ?? m.startDate,
           end = correction.endDate ?? m.endDate;
-        if (start && end && start > end) continue;
-        all.set(m.id, {
+        if (start && end && start > end) { invalid = true; break; }
+        proposed.set(m.id, {
           ...m,
           startDate: start,
           endDate: end,
@@ -801,11 +810,12 @@ export async function governMemberships(
         applied = true;
       }
       if (
-        applied &&
-        ![...all.values()].some((m, i, a) =>
+        applied && !invalid &&
+        ![...proposed.values()].some((m, i, a) =>
           a.slice(i + 1).some((other) => membershipConflict(m, other)),
         )
       ) {
+        for (const [id, value] of proposed) all.set(id, value);
         f.status = "resolved";
         f.reason = r.answer.reason;
         f.evidence = r.evidence;
@@ -877,6 +887,7 @@ export function verifyFacts(
     { markMillis: number; reliability: number; change: Change }
   >();
   for (const row of input.rows) {
+    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     if (row.hometown) {
       out.metrics.ruleDecisions++;

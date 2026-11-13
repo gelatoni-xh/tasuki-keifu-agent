@@ -18,10 +18,11 @@ export function journalResearch(db: GovernanceDB, task: Task, attemptId: string,
       [attemptId, callId],
     )).rows[0]?.entry as Entry | undefined);
     let entry = cached;
-    if (!entry || (!entry.outcome.answer && !entry.outcome.batchAnswer && !entry.outcome.crossAnswer && !["research_budget_exhausted", "research_not_configured"].includes(entry.outcome.stopReason ?? ""))) {
+    if (!entry || (!entry.outcome.answer && !entry.outcome.batchAnswer && !entry.outcome.crossAnswer && !["research_budget_exhausted", "research_not_configured", "research_has_no_verified_source_reference", "research_scope_too_large", "identity_footprint_too_large"].includes(entry.outcome.stopReason ?? ""))) {
       const usage = emptyMetrics();
       const outcome = await research(request, usage);
       if (cached) {
+        if (cached.metrics.llmCalls && cached.metrics.costKnown !== true) usage.costKnown = false;
         for (const key of ["llmCalls", "networkCalls", "inputTokens", "outputTokens", "estimatedCostUsd"] as const)
           usage[key] += cached.metrics[key];
         usage.llmModels = [...new Set([...usage.llmModels, ...cached.metrics.llmModels])];

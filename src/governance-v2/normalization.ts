@@ -4,9 +4,9 @@ import { normalizeOrganizations, normalizePeople } from "./agents.js";
 import type { Researcher, ResearchOutcome, ResearchRequest } from "./research.js";
 import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
-import { normalizeName } from "./rules.js";
+import { isDnsRow, normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/4";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/5";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
@@ -14,6 +14,8 @@ export type NormalizationState = {
   issues: NonNullable<ResearchOutcome["crossAnswer"]>["issues"];
   affectedPersonKeys: string[];
   crossCheckEvidenceRefs?: string[];
+  pendingOrganizationKeys?: string[];
+  confirmedOrganizationKeys?: string[];
 };
 export const initialNormalization = (): NormalizationState => ({
   requests: {}, decisions: {}, organizationOverrides: {}, issues: [], affectedPersonKeys: [],
@@ -27,10 +29,14 @@ export async function projectNormalization(batchId: string, input: BatchInput, c
   state: NormalizationState, metrics: Metrics, people: boolean): Promise<Resolution> {
   const replay: Researcher = async (r) => {
     state.requests[keyOf(r)] = r;
+    if (r.kind === "person_identity" && input.rows.some(row => row.key === r.subjectRef &&
+        state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")))
+      return { stopReason: "organization_dependency_unresolved", evidence: [] };
     return state.decisions[keyOf(r)] ?? { stopReason: "pending_normalization", evidence: [] };
   };
-  const orgs = await normalizeOrganizations(batchId, input, ctx, replay, true, state.organizationOverrides);
-  const forceReview = new Set(state.issues.filter(i => ["unresolved", "research"].includes(i.suggestedAction) || i.issueType === "circular_evidence").flatMap(i => i.personKeys));
+  const orgs = await normalizeOrganizations(batchId, input, ctx, replay, true, state.organizationOverrides,
+    new Set([...(state.pendingOrganizationKeys ?? []), ...Object.entries(state.decisions).filter(([key, d]) => key.startsWith("organization_identity:") && d.answer?.verdict === "distinct").map(([key]) => key.slice("organization_identity:".length))]));
+  const forceReview = new Set([...input.rows.filter(row => state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")).map(row => row.key), ...state.issues.filter(i => ["unresolved", "research"].includes(i.suggestedAction) || i.issueType === "circular_evidence").flatMap(i => i.personKeys)]);
   const result = people ? await normalizePeople(batchId, input, ctx, orgs, replay, true, forceReview) : orgs;
   metrics.durationMs += result.metrics.durationMs;
   for (const change of result.changes) {
@@ -111,7 +117,10 @@ function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx
         item.targetId = null;
         item.reason = `${reason} 原因：${item.reason}`;
       } else if (!item.evidenceRefs.length && request.kind !== "person_identity") {
-        throw new Error("Invalid normalization batch scope/evidence");
+        (metrics && (metrics.normalizationWarnings ??= []))?.push({ itemKey: item.itemKey,
+          code: "organization_match_missing_evidence", ignoredTargetId: item.targetId! });
+        item.verdict = "unresolved"; item.targetId = null;
+        item.reason = `缺少组织独立证据，保留待复核；${item.reason}`;
       }
     }
     seen.add(item.itemKey);
@@ -163,7 +172,8 @@ export async function crossCheck(input: BatchInput, ctx: Context, state: Normali
       throw new Error(`Cross-check model failure: ${outcome.stopReason ?? "missing_cross_answer"}`);
     next.issues = [];
   } else next.issues = crossAnswerSchema.parse(outcome.crossAnswer).issues;
-  stage(resolution.metrics, "normalization_cross_check", input.rows.length, 0, started);
+  const flagged = new Set(next.issues.filter(i => i.suggestedAction !== "keep").flatMap(i => i.personKeys));
+  stage(resolution.metrics, "normalization_cross_check", input.rows.length, input.rows.length - flagged.size, started);
   return next;
 }
 export function validateCrossCheck(input: BatchInput, state: NormalizationState, ctx?: Context): NormalizationState {
@@ -177,11 +187,22 @@ export function validateCrossCheck(input: BatchInput, state: NormalizationState,
     ...input.rows.map(r => `source:${r.key}`),
     ...(ctx?.memberships ?? []).map(m => `membership:${m.id}`),
   ]);
-  for (const issue of state.issues) {
+  for (const issue of next.issues) {
     if (seen.has(issue.issueKey) || !input.organizations.some(o => o.key === issue.organizationKey) ||
       issue.personKeys.some(k => !input.rows.some(r => r.key === k && r.organizationKey === issue.organizationKey)) ||
       !issue.evidenceRefs.length || issue.evidenceRefs.some(ref => !refs.has(ref)))
       throw new Error("Cross-check returned unsupported issue scope/evidence");
+    const personIds = new Set(issue.personKeys.flatMap(k =>
+      state.requests[`person_identity:${k}`]?.allowedIds ?? []));
+    const related = new Set([`source:${issue.organizationKey}`, ...issue.personKeys.map(k => `source:${k}`),
+      ...(ctx?.historicalResults ?? []).filter(h => personIds.has(h.personId)).map(h => `result:${h.id}`),
+      ...(ctx?.historicalReferences ?? []).filter(h => personIds.has(h.personId)).map(h => `reference:${h.id}`),
+      ...(ctx?.memberships ?? []).filter(m => personIds.has(m.personId)).map(m => `membership:${m.id}`)]);
+    issue.evidenceRefs = issue.evidenceRefs.filter(ref => related.has(ref));
+    if (!issue.evidenceRefs.length) {
+      issue.reason = `缺少与本问题相关的证据；${issue.reason}`;
+      issue.suggestedAction = "unresolved";
+    }
     seen.add(issue.issueKey);
     if (["unresolved", "research"].includes(issue.suggestedAction) || issue.issueType === "circular_evidence") {
       for (const personKey of issue.personKeys) {
@@ -216,14 +237,23 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
     }, resolution.metrics);
     const items = requireBatch(outcome, requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] }, resolution.metrics);
     saveItems(next, requests, items);
+    for (const request of requests) next.requests[keyOf(request)] = request;
     for (const item of items) {
       const r = requests.find(r => keyOf(r) === item.itemKey)!;
       if (item.verdict === "match" && item.targetId && resolution.organizationMap[r.subjectRef] !== item.targetId)
         next.organizationOverrides[r.subjectRef] = item.targetId;
     }
   }
+  next.confirmedOrganizationKeys = [...new Set([...(next.confirmedOrganizationKeys ?? []), ...requests.filter(r =>
+    ["match", "distinct"].includes(next.decisions[keyOf(r)]?.answer?.verdict ?? "")).map(r => r.subjectRef)])];
+  next.pendingOrganizationKeys = [...new Set([
+    ...Object.values(next.requests).filter(r => r.kind === "organization_identity" &&
+      !["match", "distinct"].includes(next.decisions[keyOf(r)]?.answer?.verdict ?? "")).map(r => r.subjectRef),
+    ...next.issues.filter(i => (i.suggestedAction === "review_organization" || i.issueType.startsWith("organization")) && i.suggestedAction !== "keep" &&
+      !next.confirmedOrganizationKeys?.includes(i.organizationKey)).map(i => i.organizationKey),
+  ])];
   const changed = Object.keys(next.organizationOverrides).filter(k => resolution.organizationMap[k] !== next.organizationOverrides[k]);
-  next.affectedPersonKeys = input.rows.filter(r => r.organizationKey && changed.includes(r.organizationKey)).map(r => r.key);
+  next.affectedPersonKeys = input.rows.filter(r => r.organizationKey && (changed.includes(r.organizationKey) || next.pendingOrganizationKeys?.includes(r.organizationKey))).map(r => r.key);
   for (const personKey of next.affectedPersonKeys) {
     delete next.decisions[`person_identity:${personKey}`];
     delete next.requests[`person_identity:${personKey}`];
@@ -234,7 +264,7 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
 export async function reassess(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
   const next = clone(state), started = Date.now();
-  const requests = Object.values(state.requests).filter(r => r.kind === "person_identity" && state.affectedPersonKeys.includes(r.subjectRef));
+  const requests = Object.values(state.requests).filter(r => r.kind === "person_identity" && state.affectedPersonKeys.includes(r.subjectRef) && !input.rows.some(row => row.key === r.subjectRef && state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")));
   if (requests.length) {
     const outcome = await research({ kind: "normalization_light", subjectRef: "affected_person_reassessment",
       question: "组织已由独立证据修正，只重评受影响选手一次；仍不能仅同名同所属确认同人。",
@@ -247,8 +277,11 @@ export async function reassess(input: BatchInput, ctx: Context, state: Normaliza
   return next;
 }
 export async function deepResearch(state: NormalizationState, resolution: Resolution, research: Researcher): Promise<NormalizationState> {
-  const next = clone(state), started = Date.now(); let count = 0;
+  const next = clone(state), started = Date.now(); let count = 0, resolved = 0;
   for (const r of Object.values(state.requests)) {
+    if (r.kind !== "person_identity" || state.pendingOrganizationKeys?.length &&
+        (r.context as { affiliation?: { source?: { key?: string } } }).affiliation?.source?.key &&
+        state.pendingOrganizationKeys.includes((r.context as { affiliation: { source: { key: string } } }).affiliation.source.key)) continue;
     const answer = state.decisions[keyOf(r)]?.answer;
     // Network research stays restricted to actual competing identities, not empty profiles.
     if (answer && answer.verdict !== "unresolved") continue;
@@ -260,13 +293,15 @@ export async function deepResearch(state: NormalizationState, resolution: Resolu
     if (!outcome.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large"].includes(outcome.stopReason ?? ""))
       throw new Error(`Deep research model failure: ${outcome.stopReason ?? "missing_answer"}`);
     next.decisions[keyOf(r)] = outcome; count++;
+    if (outcome.answer && outcome.answer.verdict !== "unresolved") resolved++;
   }
-  stage(resolution.metrics, "normalization_deep_research", count, 0, started);
+  stage(resolution.metrics, "normalization_deep_research", count, resolved, started);
   return next;
 }
 
 export function finalizeNormalization(input: BatchInput, state: NormalizationState, resolution: Resolution): Resolution {
   const result = clone(resolution);
+  result.metrics.normalizationDnsSkipped = input.rows.filter(row => isDnsRow(row)).map(row => row.key);
   result.metrics.normalizationSummary = {
     crossCheckIssues: state.issues.length,
     organizationCorrections: Object.keys(state.organizationOverrides).length,
@@ -276,7 +311,7 @@ export function finalizeNormalization(input: BatchInput, state: NormalizationSta
   };
   for (const issue of state.issues) {
     if (issue.suggestedAction === "keep") continue;
-    const corrected = !!state.organizationOverrides[issue.organizationKey];
+    const corrected = !!state.organizationOverrides[issue.organizationKey] || !!state.confirmedOrganizationKeys?.includes(issue.organizationKey);
     const peopleResolved = issue.personKeys.every(k => !result.findings.some(f => f.subjectRef === k && f.status === "unresolved"));
     result.findings.push({ key: `cross:${issue.issueKey}`, code: issue.issueType,
       subjectRef: issue.organizationKey, severity: "serious",

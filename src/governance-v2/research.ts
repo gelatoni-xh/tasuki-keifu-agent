@@ -269,6 +269,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
           (config.outputCostPerMillionUsd ?? 0);
       metrics.networkCalls +=
         data.output?.filter((o) => o.type === "web_search_call").length ?? 0;
+      if (data.status && data.status !== "completed") return stop(`research_response_${data.status}`, metrics);
       const content = (data.output ?? [])
         .filter((o) => o.type === "message")
         .flatMap(
