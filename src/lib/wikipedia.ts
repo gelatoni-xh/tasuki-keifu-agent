@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { env } from "../config/env.js";
-import { traceProfileWikipediaResearch } from "./tracing.js";
+import { traceOrganizationWikipediaResearch, traceProfileWikipediaResearch } from "./tracing.js";
 import { resolveHttpProxy } from "./network-proxy.js";
 
 const execFileAsync = promisify(execFile);
@@ -86,6 +86,17 @@ function birthDateValue(wikitext: string) {
     : null;
 }
 
+function nationalityValue(wikitext: string) {
+  const value = fieldValue(wikitext, ["国籍"]);
+  const shorthand = value?.match(/^\{\{([A-Z]{3})\}\}$/);
+  if (shorthand) {
+    return shorthand[1];
+  }
+
+  const countryTemplate = value?.match(/^\{\{(?:国籍|flagicon)\|([A-Z]{3})(?:\|[^}]*)?\}\}$/i);
+  return countryTemplate?.[1]?.toUpperCase() ?? value;
+}
+
 function suggestedProfileFields(wikitext: string, missingFields: string[]) {
   const fields: Record<string, string> = {};
 
@@ -98,7 +109,7 @@ function suggestedProfileFields(wikitext: string, missingFields: string[]) {
     if (hometown) fields.hometown = hometown;
   }
   if (missingFields.includes("nationality")) {
-    const nationality = fieldValue(wikitext, ["国籍"]);
+    const nationality = nationalityValue(wikitext);
     if (nationality) fields.nationality = nationality;
   }
   if (missingFields.includes("displayNameKana")) {
@@ -281,3 +292,86 @@ async function researchProfileWikipediaImpl(
 }
 
 export const researchProfileWikipedia = traceProfileWikipediaResearch(researchProfileWikipediaImpl);
+
+export type OrganizationWikipediaResearchInput = {
+  targetName: string;
+  missingFields: string[];
+};
+
+export type OrganizationWikipediaResearchResult = {
+  status: "found" | "not_found" | "unavailable";
+  summary: string;
+  sourceUrl: string | null;
+  suggestedFields: Record<string, string>;
+};
+
+function rawFieldValue(wikitext: string, names: string[]) {
+  for (const name of names) {
+    const match = wikitext.match(new RegExp(`^\\s*\\|\\s*${name}\\s*=\\s*(.+)$`, "mi"));
+    if (match?.[1]?.trim()) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+function organizationSuggestedFields(wikitext: string, missingFields: string[]) {
+  const fields: Record<string, string> = {};
+  if (missingFields.includes("websiteUrl")) {
+    const raw = rawFieldValue(wikitext, ["公式サイト", "公式ウェブサイト", "ウェブサイト", "Website"]);
+    const url = raw?.match(/https?:\/\/[^\s\]|}]+/i)?.[0] ?? null;
+    if (url) fields.websiteUrl = url;
+  }
+  if (missingFields.includes("prefecture")) {
+    const location = fieldValue(wikitext, ["所在地", "本部所在地", "所在地国"]);
+    const prefecture = location?.match(/(北海道|東京都|京都府|大阪府|.{2,3}県)/u)?.[1] ?? null;
+    if (prefecture) fields.prefecture = prefecture;
+  }
+  return fields;
+}
+
+async function researchOrganizationWikipediaImpl(
+  input: OrganizationWikipediaResearchInput,
+): Promise<OrganizationWikipediaResearchResult> {
+  try {
+    const response = await fetchWikipediaPage(input.targetName);
+    const page = response.query?.pages?.[0];
+    const wikitext = page?.revisions?.[0]?.slots?.main?.content ?? "";
+    const titleMatchesTarget = page?.title
+      ? normalizeWikipediaTitle(page.title) === normalizeWikipediaTitle(input.targetName)
+      : false;
+    if (!page || page.missing || page.pageprops?.disambiguation || !titleMatchesTarget || !wikitext) {
+      return {
+        status: "not_found",
+        summary: "Wikipedia 没有找到可安全使用的对应组织页面。",
+        sourceUrl: null,
+        suggestedFields: {},
+      };
+    }
+    const suggestedFields = organizationSuggestedFields(wikitext, input.missingFields);
+    const sourceUrl = `https://ja.wikipedia.org/wiki/${encodeURIComponent(page.title ?? input.targetName)}`;
+    if (Object.keys(suggestedFields).length === 0) {
+      return {
+        status: "not_found",
+        summary: "Wikipedia 页面存在，但没有明确提供当前可写入的官网或都道府县。",
+        sourceUrl,
+        suggestedFields: {},
+      };
+    }
+    return {
+      status: "found",
+      summary: `Wikipedia 明确提供了 ${Object.keys(suggestedFields).length} 个组织基础字段。`,
+      sourceUrl,
+      suggestedFields,
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      summary: `Wikipedia API 查询未完成：${error instanceof Error ? error.message : String(error)}`,
+      sourceUrl: null,
+      suggestedFields: {},
+    };
+  }
+}
+
+export const researchOrganizationWikipedia = traceOrganizationWikipediaResearch(researchOrganizationWikipediaImpl);

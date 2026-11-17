@@ -1,6 +1,7 @@
 import {
   parseMarkMembershipsConflictingPayload,
   parseMarkPersonalBestsConflictingPayload,
+  parseMergeOrganizationPayload,
   parseMergePersonPayload,
   parseWikipediaPersonalBestsPayload,
   parseWikipediaProfilePayload,
@@ -81,6 +82,21 @@ const validPersonalBestConflictAction: ActionBundleItem = {
   idempotencyKey: "person:pb-a:pb-b:mark_personal_bests_conflicting:conflicting_personal_best",
 };
 
+const validOrganizationMergeAction: ActionBundleItem = {
+  code: "merge_organization_duplicate",
+  title: "Merge confirmed duplicate organization",
+  order: 1,
+  rationale: "smoke test",
+  relatedIssueCodes: ["duplicate_normalized_organization_name"],
+  payload: {
+    canonicalOrganizationId: "organization-canonical",
+    canonicalOrganizationSlug: "canonical-organization",
+    duplicateOrganizationId: "organization-duplicate",
+    duplicateOrganizationSlug: "duplicate-organization",
+  },
+  idempotencyKey: "organization:organization-canonical:organization-duplicate:merge_organization_duplicate",
+};
+
 async function main() {
   const payload = parseMergePersonPayload(validAction);
   if (payload.canonicalPersonId !== "canonical-id" || payload.duplicatePersonId !== "duplicate-id") {
@@ -110,11 +126,13 @@ async function main() {
   const personalBests = parseWikipediaPersonalBestsPayload(validWikipediaPersonalBestAction);
   const memberships = parseMarkMembershipsConflictingPayload(validMembershipConflictAction);
   const personalBestConflicts = parseMarkPersonalBestsConflictingPayload(validPersonalBestConflictAction);
+  const organizationMerge = parseMergeOrganizationPayload(validOrganizationMergeAction);
   if (
     profile.suggestedFields.birthDate !== "1997-09-25"
     || personalBests.personalBests[0]?.discipline !== "m5000"
     || memberships.membershipIds.length !== 2
     || personalBestConflicts.personalBestIds.length !== 2
+    || organizationMerge.canonicalOrganizationId !== "organization-canonical"
   ) {
     throw new Error("new action payload was not parsed");
   }
@@ -126,6 +144,7 @@ async function main() {
     validWikipediaPersonalBestPayload: true,
     validMembershipConflictPayload: true,
     validPersonalBestConflictPayload: true,
+    validOrganizationMergePayload: true,
   }, null, 2)}\n`);
 }
 

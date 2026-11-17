@@ -1,5 +1,5 @@
 import { env } from "../config/env.js";
-import { traceNameIdentityResearch } from "./tracing.js";
+import { traceNameIdentityResearch, traceOrganizationIdentityResearch } from "./tracing.js";
 
 type JsonValue = Record<string, unknown>;
 
@@ -152,3 +152,79 @@ async function researchNameIdentityImpl(input: NameIdentityResearchInput): Promi
 }
 
 export const researchNameIdentity = traceNameIdentityResearch(researchNameIdentityImpl);
+
+export type OrganizationIdentityResearchInput = {
+  targetName: string;
+  targetType: string;
+  candidates: Array<{
+    organizationId: string;
+    organizationSlug: string;
+    nameJa: string;
+    nameKana?: string | null;
+    nameRoman?: string | null;
+    type: string;
+  }>;
+};
+
+export type OrganizationIdentityResearchResult = NameIdentityResearchResult;
+
+async function researchOrganizationIdentityImpl(
+  input: OrganizationIdentityResearchInput,
+): Promise<OrganizationIdentityResearchResult> {
+  const config = getConfig();
+  if (!config) {
+    return {
+      verdict: "uncertain",
+      summary: "未配置本地 LLM 认证，无法继续研究。",
+      reason: "OPENAI_API_KEY 不存在。",
+      sourceMode: "unavailable",
+    };
+  }
+
+  const instructions = [
+    "你负责判断日本长跑相关组织是否可能是同一实体。",
+    "组织可能是学校、大学、实业团、公司或俱乐部；需区分改名、简称、母公司与队伍、同名不同组织。",
+    "先尽量使用联网搜索核对公开资料；资料少时不要过度推断。",
+    "只有证据充分时才输出 same 或 different，证据不足必须输出 uncertain。",
+    "不要因为日文名称完全相同就直接断定 same；需结合组织类型、所在地、沿革、官网和关联队伍。",
+    "只输出 JSON，不要 Markdown。字段必须是 verdict、summary、reason。",
+    'verdict 只能是 "same"、"different"、"uncertain"。',
+  ].join("\n");
+
+  const payload = JSON.stringify(input, null, 2);
+  try {
+    const response = await postJson(
+      "/responses",
+      {
+        model: config.model,
+        instructions,
+        input: payload,
+        tools: [{ type: "web_search_preview" }],
+        max_output_tokens: 500,
+      },
+      config,
+    );
+    const outputText =
+      (typeof response.output_text === "string" && response.output_text) ||
+      (Array.isArray(response.output)
+        ? response.output
+            .flatMap((item) => (item && typeof item === "object" && Array.isArray((item as { content?: unknown[] }).content)
+              ? (item as { content: unknown[] }).content
+              : []))
+            .map((item) => item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+              ? (item as { text: string }).text
+              : "")
+            .join("")
+        : "");
+    return parseResearchResult(parseJsonObject(outputText), "web_search");
+  } catch {
+    return {
+      verdict: "uncertain",
+      summary: "组织身份研究未完成，已保留为不确定结果。",
+      reason: "联网 LLM 研究不可用。",
+      sourceMode: "unavailable",
+    };
+  }
+}
+
+export const researchOrganizationIdentity = traceOrganizationIdentityResearch(researchOrganizationIdentityImpl);

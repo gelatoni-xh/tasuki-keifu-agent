@@ -11,6 +11,14 @@ type MergePersonPayload = {
   researchSummary?: string | null;
 };
 
+type MergeOrganizationPayload = {
+  canonicalOrganizationId: string;
+  canonicalOrganizationSlug: string;
+  duplicateOrganizationId: string;
+  duplicateOrganizationSlug: string;
+  researchSummary?: string | null;
+};
+
 type WikipediaProfilePayload = {
   personId: string;
   personSlug: string;
@@ -27,6 +35,13 @@ type WikipediaPersonalBestsPayload = {
     mark: string;
     markMillis: number;
   }>;
+};
+
+type WikipediaOrganizationPayload = {
+  organizationId: string;
+  organizationSlug: string;
+  sourceUrl: string;
+  suggestedFields: Record<string, string>;
 };
 
 type MarkMembershipsConflictingPayload = {
@@ -49,8 +64,25 @@ type PersonForMerge = {
   updatedAt: Date;
 };
 
+type OrganizationForMerge = {
+  id: string;
+  slug: string;
+  nameJa: string;
+  type: string;
+  nameKana: string | null;
+  nameRoman: string | null;
+  nameZh: string | null;
+  nameEn: string | null;
+  shortName: string | null;
+  location: string | null;
+  prefecture: string | null;
+  websiteUrl: string | null;
+  notes: string | null;
+};
+
 const wikipediaSourceUrl = "https://ja.wikipedia.org/";
 const profileFieldNames = ["birthDate", "hometown", "nationality", "displayNameKana"] as const;
+const organizationFieldNames = ["websiteUrl", "prefecture"] as const;
 const personalBestDisciplines = new Set([
   "m800",
   "m1500",
@@ -104,6 +136,15 @@ function isMergePersonPayload(value: Record<string, unknown>): value is MergePer
   ].every((key) => typeof value[key] === "string" && value[key].trim().length > 0);
 }
 
+function isMergeOrganizationPayload(value: Record<string, unknown>): value is MergeOrganizationPayload {
+  return [
+    "canonicalOrganizationId",
+    "canonicalOrganizationSlug",
+    "duplicateOrganizationId",
+    "duplicateOrganizationSlug",
+  ].every((key) => typeof value[key] === "string" && value[key].trim().length > 0);
+}
+
 export function parseMergePersonPayload(action: ActionBundleItem): MergePersonPayload {
   const payload = actionPayload(action);
   if (action.code !== "merge_person_duplicate" || !isMergePersonPayload(payload)) {
@@ -114,6 +155,17 @@ export function parseMergePersonPayload(action: ActionBundleItem): MergePersonPa
     throw new Error("Merge action requires two different person records.");
   }
 
+  return payload;
+}
+
+export function parseMergeOrganizationPayload(action: ActionBundleItem): MergeOrganizationPayload {
+  const payload = actionPayload(action);
+  if (action.code !== "merge_organization_duplicate" || !isMergeOrganizationPayload(payload)) {
+    throw new Error(`Unsupported action payload: ${action.code}`);
+  }
+  if (payload.canonicalOrganizationId === payload.duplicateOrganizationId) {
+    throw new Error("Merge action requires two different organization records.");
+  }
   return payload;
 }
 
@@ -189,6 +241,33 @@ export function parseWikipediaPersonalBestsPayload(action: ActionBundleItem): Wi
   };
 }
 
+export function parseWikipediaOrganizationPayload(action: ActionBundleItem): WikipediaOrganizationPayload {
+  const payload = actionPayload(action);
+  if (
+    action.code !== "backfill_organization_from_wikipedia"
+    || !isNonEmptyString(payload.organizationId)
+    || !isNonEmptyString(payload.organizationSlug)
+    || !isWikipediaUrl(payload.sourceUrl)
+    || !isStringRecord(payload.suggestedFields)
+  ) {
+    throw new Error(`Unsupported action payload: ${action.code}`);
+  }
+  const suggestedFields = Object.fromEntries(
+    Object.entries(payload.suggestedFields).filter(
+      ([field, value]) => organizationFieldNames.includes(field as (typeof organizationFieldNames)[number]) && isNonEmptyString(value),
+    ),
+  );
+  if (Object.keys(suggestedFields).length === 0) {
+    throw new Error("Wikipedia organization action has no supported fields.");
+  }
+  return {
+    organizationId: payload.organizationId,
+    organizationSlug: payload.organizationSlug,
+    sourceUrl: payload.sourceUrl,
+    suggestedFields,
+  };
+}
+
 export function parseMarkMembershipsConflictingPayload(action: ActionBundleItem): MarkMembershipsConflictingPayload {
   const payload = actionPayload(action);
   if (
@@ -259,9 +338,33 @@ async function loadPeopleForMerge(client: PoolClient, payload: MergePersonPayloa
   return { canonical, duplicate };
 }
 
+async function loadOrganizationsForMerge(client: PoolClient, payload: MergeOrganizationPayload) {
+  const { rows } = await client.query<OrganizationForMerge>(
+    `
+      SELECT
+        "id", "slug", "nameJa", "type", "nameKana", "nameRoman", "nameZh", "nameEn",
+        "shortName", "location", "prefecture", "websiteUrl", "notes"
+      FROM "Organization"
+      WHERE "id" = ANY($1::text[])
+      ORDER BY "id"
+      FOR UPDATE
+    `,
+    [[payload.canonicalOrganizationId, payload.duplicateOrganizationId]],
+  );
+  const canonical = rows.find((row) => row.id === payload.canonicalOrganizationId);
+  const duplicate = rows.find((row) => row.id === payload.duplicateOrganizationId);
+  if (!canonical || !duplicate) {
+    throw new Error("Organization merge target no longer exists.");
+  }
+  if (canonical.slug !== payload.canonicalOrganizationSlug || duplicate.slug !== payload.duplicateOrganizationSlug) {
+    throw new Error("Organization merge target slug changed after diagnosis.");
+  }
+  return { canonical, duplicate };
+}
+
 async function movePersonReferences(client: PoolClient, canonicalId: string, duplicateId: string) {
-  await client.query(`UPDATE "Membership" SET "personId" = $1 WHERE "personId" = $2`, [canonicalId, duplicateId]);
-  await client.query(`UPDATE "PersonalBest" SET "personId" = $1 WHERE "personId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "Membership" SET "personId" = $1, "updatedAt" = NOW() WHERE "personId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "PersonalBest" SET "personId" = $1, "updatedAt" = NOW() WHERE "personId" = $2`, [canonicalId, duplicateId]);
   await client.query(`UPDATE "RaceResult" SET "personId" = $1 WHERE "personId" = $2`, [canonicalId, duplicateId]);
   await client.query(`UPDATE "SourceReference" SET "personId" = $1 WHERE "personId" = $2`, [canonicalId, duplicateId]);
 }
@@ -280,7 +383,8 @@ async function mergePersonProfiles(client: PoolClient, canonicalId: string, dupl
         "nationality" = COALESCE(canonical."nationality", duplicate."nationality"),
         "heightCm" = COALESCE(canonical."heightCm", duplicate."heightCm"),
         "weightKg" = COALESCE(canonical."weightKg", duplicate."weightKg"),
-        "notes" = COALESCE(canonical."notes", duplicate."notes")
+        "notes" = COALESCE(canonical."notes", duplicate."notes"),
+        "updatedAt" = NOW()
       FROM "Person" duplicate
       WHERE canonical."id" = $1
         AND duplicate."id" = $2
@@ -423,6 +527,106 @@ async function executeMergePersonDuplicate(action: ActionBundleItem) {
   }
 }
 
+async function assertNoTeamCompetitionResultCollision(client: PoolClient, canonicalId: string, duplicateId: string) {
+  const { rows } = await client.query<{ competitionEditionId: string }>(
+    `
+      SELECT duplicate."competitionEditionId"
+      FROM "TeamCompetitionResult" duplicate
+      INNER JOIN "TeamCompetitionResult" canonical
+        ON canonical."competitionEditionId" = duplicate."competitionEditionId"
+       AND canonical."organizationId" = $1
+      WHERE duplicate."organizationId" = $2
+      LIMIT 1
+    `,
+    [canonicalId, duplicateId],
+  );
+  if (rows.length > 0) {
+    throw new Error("Organization merge blocked: both records have a team result for the same competition edition.");
+  }
+}
+
+async function mergeOrganizationProfile(client: PoolClient, canonicalId: string, duplicateId: string) {
+  await client.query(
+    `
+      UPDATE "Organization" canonical
+      SET
+        "nameKana" = COALESCE(canonical."nameKana", duplicate."nameKana"),
+        "nameRoman" = COALESCE(canonical."nameRoman", duplicate."nameRoman"),
+        "nameZh" = COALESCE(canonical."nameZh", duplicate."nameZh"),
+        "nameEn" = COALESCE(canonical."nameEn", duplicate."nameEn"),
+        "shortName" = COALESCE(canonical."shortName", duplicate."shortName"),
+        "location" = COALESCE(canonical."location", duplicate."location"),
+        "prefecture" = COALESCE(canonical."prefecture", duplicate."prefecture"),
+        "websiteUrl" = COALESCE(canonical."websiteUrl", duplicate."websiteUrl"),
+        "notes" = COALESCE(canonical."notes", duplicate."notes"),
+        "updatedAt" = NOW()
+      FROM "Organization" duplicate
+      WHERE canonical."id" = $1
+        AND duplicate."id" = $2
+    `,
+    [canonicalId, duplicateId],
+  );
+}
+
+async function moveOrganizationReferences(client: PoolClient, canonicalId: string, duplicateId: string) {
+  await client.query(`UPDATE "Membership" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "PersonalBest" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "RaceResult" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "TeamCompetitionResult" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "SourceReference" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+  await client.query(`UPDATE "NameVariant" SET "organizationId" = $1, "updatedAt" = NOW() WHERE "organizationId" = $2`, [canonicalId, duplicateId]);
+}
+
+async function preserveOrganizationNames(client: PoolClient, canonical: OrganizationForMerge, duplicate: OrganizationForMerge) {
+  for (const value of new Set([canonical.nameJa, duplicate.nameJa])) {
+    await client.query(
+      `
+        INSERT INTO "NameVariant" ("id", "value", "type", "isPrimary", "organizationId", "createdAt", "updatedAt")
+        SELECT
+          CONCAT('agent-', substr(md5(random()::text || clock_timestamp()::text), 1, 21)),
+          $2, 'official', false, $1, NOW(), NOW()
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "NameVariant"
+          WHERE "organizationId" = $1 AND "value" = $2
+        )
+      `,
+      [canonical.id, value],
+    );
+  }
+}
+
+async function executeMergeOrganizationDuplicate(action: ActionBundleItem) {
+  const payload = parseMergeOrganizationPayload(action);
+  const pool = getBusinessWritePool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { canonical, duplicate } = await loadOrganizationsForMerge(client, payload);
+    await assertNoTeamCompetitionResultCollision(client, canonical.id, duplicate.id);
+    await mergeOrganizationProfile(client, canonical.id, duplicate.id);
+    await moveOrganizationReferences(client, canonical.id, duplicate.id);
+    await preserveOrganizationNames(client, canonical, duplicate);
+    await recordAuditLog(client, {
+      entityType: "Organization",
+      entityId: canonical.id,
+      action: "merge",
+      oldValue: { mergedOrganizationId: duplicate.id, mergedOrganizationSlug: duplicate.slug, mergedOrganizationNameJa: duplicate.nameJa },
+      newValue: { canonicalOrganizationId: canonical.id, canonicalOrganizationSlug: canonical.slug, canonicalOrganizationNameJa: canonical.nameJa },
+      reasonType: "entity_merge",
+      reasonNote: payload.researchSummary ?? "Agent-confirmed duplicate organization merge.",
+      metadata: { agentActionCode: action.code, idempotencyKey: action.idempotencyKey },
+    });
+    await client.query(`DELETE FROM "Organization" WHERE "id" = $1`, [duplicate.id]);
+    await client.query("COMMIT");
+    return { canonicalOrganizationId: canonical.id, duplicateOrganizationId: duplicate.id, action: "merged" };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function ensureWikipediaSource(client: PoolClient) {
   const { rows } = await client.query<{ id: string }>(
     `
@@ -488,14 +692,36 @@ async function requirePersonForWrite(client: PoolClient, input: { personId: stri
   return person;
 }
 
+async function requireOrganizationForWrite(client: PoolClient, input: { organizationId: string; organizationSlug: string }) {
+  const { rows } = await client.query<{
+    id: string;
+    slug: string;
+    websiteUrl: string | null;
+    prefecture: string | null;
+  }>(
+    `
+      SELECT "id", "slug", "websiteUrl", "prefecture"
+      FROM "Organization"
+      WHERE "id" = $1
+      FOR UPDATE
+    `,
+    [input.organizationId],
+  );
+  const organization = rows[0];
+  if (!organization || organization.slug !== input.organizationSlug) {
+    throw new Error("Organization target changed after diagnosis.");
+  }
+  return organization;
+}
+
 async function recordAuditLog(client: PoolClient, input: {
   entityType: string;
   entityId: string;
-  action: "create" | "update";
+  action: "create" | "update" | "merge";
   fieldName?: string | null;
   oldValue: unknown;
   newValue: unknown;
-  reasonType: "source_update" | "verification_update";
+  reasonType: "source_update" | "verification_update" | "entity_merge";
   reasonNote: string;
   sourceId?: string | null;
   metadata: Record<string, unknown>;
@@ -529,6 +755,10 @@ async function recordAuditLog(client: PoolClient, input: {
   );
 }
 
+async function touchPersonUpdatedAt(client: PoolClient, personId: string) {
+  await client.query(`UPDATE "Person" SET "updatedAt" = NOW() WHERE "id" = $1`, [personId]);
+}
+
 async function executeBackfillProfileFromWikipedia(action: ActionBundleItem) {
   const payload = parseWikipediaProfilePayload(action);
   const pool = getBusinessWritePool();
@@ -560,7 +790,8 @@ async function executeBackfillProfileFromWikipedia(action: ActionBundleItem) {
           "birthDate" = COALESCE("birthDate", $2::date),
           "hometown" = COALESCE("hometown", $3),
           "nationality" = COALESCE("nationality", $4),
-          "displayNameKana" = COALESCE("displayNameKana", $5)
+          "displayNameKana" = COALESCE("displayNameKana", $5),
+          "updatedAt" = NOW()
         WHERE "id" = $1
       `,
       [person.id, next.birthDate, next.hometown, next.nationality, next.displayNameKana],
@@ -609,6 +840,72 @@ async function executeBackfillProfileFromWikipedia(action: ActionBundleItem) {
   }
 }
 
+async function executeBackfillOrganizationFromWikipedia(action: ActionBundleItem) {
+  const payload = parseWikipediaOrganizationPayload(action);
+  const pool = getBusinessWritePool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const organization = await requireOrganizationForWrite(client, payload);
+    const sourceId = await ensureWikipediaSource(client);
+    const next = {
+      websiteUrl: organization.websiteUrl ? null : payload.suggestedFields.websiteUrl ?? null,
+      prefecture: organization.prefecture ? null : payload.suggestedFields.prefecture ?? null,
+    };
+    const changed = Object.fromEntries(Object.entries(next).filter(([, value]) => value !== null));
+    if (Object.keys(changed).length === 0) {
+      await client.query("COMMIT");
+      return { organizationId: organization.id, action: "skipped", reason: "organization_fields_already_present" };
+    }
+    await client.query(
+      `
+        UPDATE "Organization"
+        SET
+          "websiteUrl" = COALESCE("websiteUrl", $2),
+          "prefecture" = COALESCE("prefecture", $3),
+          "updatedAt" = NOW()
+        WHERE "id" = $1
+      `,
+      [organization.id, next.websiteUrl, next.prefecture],
+    );
+    await client.query(
+      `
+        INSERT INTO "SourceReference" (
+          "id", "sourceId", "sourceEntityType", "sourceEntityKey", "sourceUrl", "organizationId", "metadata", "createdAt", "updatedAt"
+        )
+        VALUES (
+          CONCAT('agent-', substr(md5(random()::text || clock_timestamp()::text), 1, 21)),
+          $1, 'wikipedia_organization', $2, $3, $2, $4::jsonb, NOW(), NOW()
+        )
+        ON CONFLICT ("sourceId", "sourceEntityType", "sourceEntityKey")
+        DO UPDATE SET
+          "sourceUrl" = EXCLUDED."sourceUrl",
+          "metadata" = EXCLUDED."metadata",
+          "updatedAt" = NOW()
+      `,
+      [sourceId, organization.id, payload.sourceUrl, JSON.stringify({ agentActionCode: action.code })],
+    );
+    await recordAuditLog(client, {
+      entityType: "Organization",
+      entityId: organization.id,
+      action: "update",
+      oldValue: { websiteUrl: organization.websiteUrl, prefecture: organization.prefecture },
+      newValue: changed,
+      reasonType: "source_update",
+      reasonNote: "Wikipedia supplied explicit missing organization fields.",
+      sourceId,
+      metadata: { agentActionCode: action.code, idempotencyKey: action.idempotencyKey, sourceUrl: payload.sourceUrl },
+    });
+    await client.query("COMMIT");
+    return { organizationId: organization.id, action: "updated", fields: Object.keys(changed) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function executeUpsertPersonalBestsFromWikipedia(action: ActionBundleItem) {
   const payload = parseWikipediaPersonalBestsPayload(action);
   const pool = getBusinessWritePool();
@@ -619,6 +916,7 @@ async function executeUpsertPersonalBestsFromWikipedia(action: ActionBundleItem)
     await requirePersonForWrite(client, payload);
     const sourceId = await ensureWikipediaSource(client);
     const results: Array<Record<string, unknown>> = [];
+    let changedAny = false;
 
     for (const personalBest of payload.personalBests) {
       const { rows: existingRows } = await client.query<{
@@ -674,6 +972,7 @@ async function executeUpsertPersonalBestsFromWikipedia(action: ActionBundleItem)
           personalBestId: inserted[0].id,
           existingCount: existingRows.length,
         });
+        changedAny = true;
         continue;
       }
 
@@ -691,7 +990,8 @@ async function executeUpsertPersonalBestsFromWikipedia(action: ActionBundleItem)
               "mark" = $2,
               "markMillis" = $3,
               "sourceId" = $4,
-              "status" = 'verified'
+              "status" = 'verified',
+              "updatedAt" = NOW()
             WHERE "id" = $1
           `,
           [existing.id, personalBest.mark, personalBest.markMillis, sourceId],
@@ -707,10 +1007,14 @@ async function executeUpsertPersonalBestsFromWikipedia(action: ActionBundleItem)
           sourceId,
           metadata: { agentActionCode: action.code, idempotencyKey: action.idempotencyKey, sourceUrl: payload.sourceUrl },
         });
+        changedAny = true;
       }
       results.push({ discipline: personalBest.discipline, action: changed ? "updated" : "skipped", personalBestId: existing.id });
     }
 
+    if (changedAny) {
+      await touchPersonUpdatedAt(client, payload.personId);
+    }
     await client.query("COMMIT");
     return { personId: payload.personId, results };
   } catch (error) {
@@ -743,11 +1047,12 @@ async function executeMarkMembershipsConflicting(action: ActionBundleItem) {
       throw new Error("Membership targets changed after diagnosis.");
     }
 
+    let changedAny = false;
     for (const membership of rows) {
       if (membership.status === "conflicting") {
         continue;
       }
-      await client.query(`UPDATE "Membership" SET "status" = 'conflicting' WHERE "id" = $1`, [membership.id]);
+      await client.query(`UPDATE "Membership" SET "status" = 'conflicting', "updatedAt" = NOW() WHERE "id" = $1`, [membership.id]);
       await recordAuditLog(client, {
         entityType: "Membership",
         entityId: membership.id,
@@ -758,6 +1063,10 @@ async function executeMarkMembershipsConflicting(action: ActionBundleItem) {
         reasonNote: "Agent detected a membership timeline anomaly.",
         metadata: { agentActionCode: action.code, idempotencyKey: action.idempotencyKey, findingCodes: payload.findingCodes },
       });
+      changedAny = true;
+    }
+    if (changedAny) {
+      await touchPersonUpdatedAt(client, payload.personId);
     }
     await client.query("COMMIT");
     return { personId: payload.personId, action: "marked_conflicting", membershipIds: rows.map((row) => row.id) };
@@ -791,11 +1100,12 @@ async function executeMarkPersonalBestsConflicting(action: ActionBundleItem) {
       throw new Error("PB targets changed after diagnosis.");
     }
 
+    let changedAny = false;
     for (const personalBest of rows) {
       if (personalBest.status === "conflicting") {
         continue;
       }
-      await client.query(`UPDATE "PersonalBest" SET "status" = 'conflicting' WHERE "id" = $1`, [personalBest.id]);
+      await client.query(`UPDATE "PersonalBest" SET "status" = 'conflicting', "updatedAt" = NOW() WHERE "id" = $1`, [personalBest.id]);
       await recordAuditLog(client, {
         entityType: "PersonalBest",
         entityId: personalBest.id,
@@ -806,6 +1116,10 @@ async function executeMarkPersonalBestsConflicting(action: ActionBundleItem) {
         reasonNote: "Agent detected a PB conflict without Wikipedia confirmation.",
         metadata: { agentActionCode: action.code, idempotencyKey: action.idempotencyKey, findingCodes: payload.findingCodes },
       });
+      changedAny = true;
+    }
+    if (changedAny) {
+      await touchPersonUpdatedAt(client, payload.personId);
     }
     await client.query("COMMIT");
     return { personId: payload.personId, action: "marked_conflicting", personalBestIds: rows.map((row) => row.id) };
@@ -821,8 +1135,14 @@ export async function executeAction(action: ActionBundleItem) {
   if (action.code === "merge_person_duplicate") {
     return executeMergePersonDuplicate(action);
   }
+  if (action.code === "merge_organization_duplicate") {
+    return executeMergeOrganizationDuplicate(action);
+  }
   if (action.code === "backfill_profile_from_wikipedia") {
     return executeBackfillProfileFromWikipedia(action);
+  }
+  if (action.code === "backfill_organization_from_wikipedia") {
+    return executeBackfillOrganizationFromWikipedia(action);
   }
   if (action.code === "upsert_personal_bests_from_wikipedia") {
     return executeUpsertPersonalBestsFromWikipedia(action);
