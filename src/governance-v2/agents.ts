@@ -391,6 +391,19 @@ export async function normalizePeople(
     });
     const historicalMatch = historical.length === 1 &&
       contextual.every(p => p.id === historical[0].person.id) ? historical[0] : undefined;
+    const sourceOrganization = row.organizationKey
+      ? input.organizations.find((o) => o.key === row.organizationKey)
+      : undefined;
+    // An unconfirmed club/federation label must not block a unique person.
+    // Keep the label only on RaceResult; it cannot create Membership evidence.
+    const uniqueUnconfirmedOrganizationMatch =
+      !orgId &&
+      !!sourceOrganization &&
+      ["unknown", "club", "company"].includes(sourceOrganization.type) &&
+      input.rows.filter((r) => r.organizationKey === row.organizationKey).length === 1 &&
+      candidates.length === 1 &&
+      normalizeName(candidates[0].displayNameJa) === normalizeName(row.name) &&
+      (!row.birthDate || !candidates[0].birthDate || row.birthDate === candidates[0].birthDate);
     let confirmedDistinct = false;
     let id =
       mapped ??
@@ -398,7 +411,9 @@ export async function normalizePeople(
       historicalMatch?.person.id ??
       (historical.length === 0 && contextual.length === 1
         ? contextual[0].id
-        : row.birthDate &&
+        : uniqueUnconfirmedOrganizationMatch
+          ? candidates[0].id
+          : row.birthDate &&
             candidates.filter((p) => p.birthDate === row.birthDate).length === 1
           ? candidates.find((p) => p.birthDate === row.birthDate)!.id
           : undefined);
@@ -415,6 +430,12 @@ export async function normalizePeople(
         rule: "exact_name_kana_historical_organization",
         evidenceRefs: [`source:${row.key}`, ...historicalMatch.records.map(h => `result:${h.id}`)],
         weakerCandidateIds: candidates.filter(p => p.id !== id).map(p => p.id) });
+    }
+    if (id && uniqueUnconfirmedOrganizationMatch && !mapped && !forceReview.has(row.key)) {
+      out.metrics.normalizationRuleMatches!.push({ subjectRef: row.key, targetId: id,
+        rule: "unique_person_under_unconfirmed_organization",
+        evidenceRefs: [`source:${row.key}`],
+        weakerCandidateIds: [] });
     }
     const currentDns = isDnsRow(row);
     // Research requires an actual competing attribution, not a mere empty field/name variation.

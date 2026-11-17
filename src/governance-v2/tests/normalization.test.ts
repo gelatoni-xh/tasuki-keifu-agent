@@ -63,6 +63,8 @@ test("unknown, club, and company entries stay as race-name snapshots", async () 
         })) }, evidence: [] },
   }).invoke({ batchId: "unknown-org", input: data, mode: "dry_run" });
   assert.equal(result.resolution.organizationMap.o, undefined);
+  assert.equal(result.resolution.personMap.a, "pa");
+  assert.equal(result.resolution.metrics.normalizationRuleMatches?.[0]?.rule, "unique_person_under_unconfirmed_organization");
   const raceResult = result.plan.changes.find(
     (change) => change.operation.kind === "race_result",
   );
