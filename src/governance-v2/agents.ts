@@ -103,6 +103,7 @@ export async function normalizeOrganizations(
   overrides: Record<string, string> = {},
   forceReview: ReadonlySet<string> = new Set(),
 ): Promise<Resolution> {
+  // 组织归一化先建立稳定映射，后续人物和 Membership 判断都依赖这个映射。
   const started = Date.now(),
     out: Resolution = {
       organizationMap: {},
@@ -290,6 +291,7 @@ export async function normalizePeople(
   light = false,
   forceReview: ReadonlySet<string> = new Set(),
 ): Promise<Resolution> {
+  // 人物归一化只提出带证据的 change；不确定身份必须保留为 finding，而不是猜测合并。
   const started = Date.now(),
     out: Resolution = {
       organizationMap: orgs.organizationMap,
@@ -610,6 +612,7 @@ export async function governMemberships(
   res: Resolution,
   research: Researcher,
 ): Promise<AgentResult> {
+  // Membership 规则区分来源观察、时间窗口和互斥关系，缺少证据时不推断结束日期。
   const started = Date.now(),
     out: AgentResult = {
       agentKey: "membership",
@@ -874,6 +877,7 @@ export function verifyFacts(
   ctx: Context,
   res: Resolution,
 ): AgentResult {
+  // 人物事实验证只比较输入明确提供的字段，不能把缺失信息当作事实冲突。
   const started = Date.now(),
     out: AgentResult = {
       agentKey: "person_facts",
@@ -984,6 +988,7 @@ export function buildPlan(
   facts: AgentResult,
   mode: Manifest["mode"],
 ): Plan {
+  // Plan 是 graph 与 writer 之间的稳定契约：它描述拟议变更，但不执行业务副作用。
   const normalization: AgentResult = {
     agentKey: "normalization",
     skipped: false,

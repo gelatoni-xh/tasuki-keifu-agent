@@ -34,6 +34,7 @@ async function main() {
     : pool;
   const db = new GovernanceDB(pool, readPool);
   try {
+    // CLI 只负责装配依赖和选择运行模式；治理判断集中在 graph/agents/normalization。
     if (command === "health") {
       const state = (
         await pool.query(
@@ -47,6 +48,7 @@ async function main() {
       return;
     }
     if (command === "setup-checkpoints") {
+      // 建表是一次性的管理操作，运行 worker 的 runtime 角色不应拥有 DDL 权限。
       await saver.setup();
       console.log("Checkpoint schema ready");
       return;
