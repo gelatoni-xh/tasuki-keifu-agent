@@ -19,6 +19,7 @@ import {
   governMemberships,
   verifyFacts,
 } from "./agents.js";
+import { isMembershipOrganizationType } from "./rules.js";
 import { initialNormalization, projectNormalization, lightBatch, crossCheck,
   validateCrossCheck, finalizeNormalization, adjudicate, researchOrganizations, reassess, deepResearch, type NormalizationState } from "./normalization.js";
 import type { Researcher } from "./research.js";
@@ -48,7 +49,10 @@ export const graphNodeNames = [
 export function route_membership_agent(
   s: BatchGraphState,
 ): "govern_membership" | "verify_person_facts" | "aggregate_governance_result" {
-  return s.input.rows.some((r) => r.memberships.length) ||
+  return s.input.rows.some((r) => r.memberships.length ||
+    (r.organizationKey && isMembershipOrganizationType(
+      s.input.organizations.find(o => o.key === r.organizationKey)?.type,
+    ))) ||
     s.context.memberships.some((m) =>
       Object.values(s.resolution.personMap).includes(m.personId),
     )
