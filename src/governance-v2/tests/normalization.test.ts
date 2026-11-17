@@ -43,6 +43,36 @@ test("person graph plans compact kanji names and preserves non-kanji separators"
     ["山田太郎", "ジョンソン モゲニ", "John Smith"],
   );
 });
+
+test("unknown, club, and company entries stay as race-name snapshots", async () => {
+  const data = input();
+  data.organizations[0].type = "unknown";
+  data.organizations[0].name = "試験クラブ";
+  data.rows = [data.rows[0]];
+  data.rows[0].organizationKey = "o";
+  const ctx = context();
+  ctx.organizations[0].type = "unknown";
+  ctx.organizations[0].nameJa = "試験クラブ";
+  const result = await buildBatchGraph({
+    loadContext: async () => ctx,
+    research: async (request) => request.kind === "normalization_cross_check"
+      ? { crossAnswer: { issues: [] }, evidence: [] }
+      : { batchAnswer: { items: (request.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items.map(item => ({
+          itemKey: item.itemKey, verdict: "distinct" as const, targetId: null,
+          evidenceRefs: item.evidence.map(e => e.key), reason: "组织未确认，不建立组织关联",
+        })) }, evidence: [] },
+  }).invoke({ batchId: "unknown-org", input: data, mode: "dry_run" });
+  assert.equal(result.resolution.organizationMap.o, undefined);
+  const raceResult = result.plan.changes.find(
+    (change) => change.operation.kind === "race_result",
+  );
+  assert.ok(raceResult && raceResult.operation.kind === "race_result");
+  assert.equal(raceResult.operation.organizationId, undefined);
+  assert.equal(raceResult.operation.organizationNameSnapshot, "試験クラブ");
+  assert.equal(result.plan.changes.some((change) => change.operation.kind === "create_organization"), false);
+  assert.equal(result.plan.changes.some((change) => change.operation.kind === "membership"), false);
+});
+
 function items(r: ResearchRequest) { return (r.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items; }
 const match: Researcher = async r => r.kind === "person_identity"
   ? { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立冲突需保留待确认", evidence: [], corrections: [], split: null }, evidence: [] }

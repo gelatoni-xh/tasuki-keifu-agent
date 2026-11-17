@@ -117,6 +117,7 @@ export async function normalizeOrganizations(
   const resolved = new Map<string, string>();
   for (const org of input.organizations) {
     out.metrics.ruleDecisions++;
+    if (["unknown", "club", "company"].includes(org.type)) continue;
     const name = normalizeName(org.name),
       identity = `${name}:${org.type}`;
     const mapped = ctx.sourceMappings.find(
@@ -1056,6 +1057,9 @@ export function buildPlan(
         personId: res.personMap[row.key],
         organizationId: row.organizationKey
           ? res.organizationMap[row.organizationKey]
+          : undefined,
+        organizationNameSnapshot: row.organizationKey
+          ? input.organizations.find((o) => o.key === row.organizationKey)?.name
           : undefined,
         row: {
           key: row.key,
