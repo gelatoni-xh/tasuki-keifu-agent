@@ -195,8 +195,17 @@ export class EventRunner {
             const fallback = context.people.filter(p => normalizeName(p.displayNameJa) === normalizeName(row.name));
             return [row.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
           }).filter(([, id]) => !!id) as Array<[string, string]>);
+          // Legacy race payloads often mark every source organization as unknown.
+          // Membership-only reruns must use the already normalized business type.
+          const membershipInput = {
+            ...input,
+            organizations: input.organizations.map(org => ({
+              ...org,
+              type: context.organizations.find(o => o.id === organizationMap[org.key])?.type ?? org.type,
+            })),
+          };
           const resolution: Resolution = { organizationMap, personMap, findings: [], changes: [], metrics: emptyMetrics() };
-          plan = await buildMembershipOnlyPlan(batch.id, input, context, resolution, task.mode, research);
+          plan = await buildMembershipOnlyPlan(batch.id, membershipInput, context, resolution, task.mode, research);
         } else {
           const result = await graph.invoke(
             snapshot.values?.batchId ? null : { batchId: batch.id, input, mode: task.mode },
