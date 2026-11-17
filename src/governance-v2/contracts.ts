@@ -275,6 +275,7 @@ export type Operation =
       kind: "race_result";
       personId: string;
       organizationId?: string;
+      organizationNameSnapshot?: string;
       row: Pick<
         PersonRow,
         "key" | "mark" | "rank" | "teamRank" | "grade" | "notes"
