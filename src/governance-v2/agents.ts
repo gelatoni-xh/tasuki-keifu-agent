@@ -1116,3 +1116,39 @@ export function buildPlan(
     },
   };
 }
+
+export async function buildMembershipOnlyPlan(
+  batchId: string,
+  input: BatchInput,
+  ctx: Context,
+  res: Resolution,
+  mode: Manifest["mode"],
+  research: Researcher,
+): Promise<Plan> {
+  const membership = await governMemberships(batchId, input, ctx, res, research);
+  const skipped = (agentKey: string): AgentResult => ({
+    agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics(),
+  });
+  const changes = membership.changes;
+  return {
+    batchId,
+    raceId: ctx.raceId,
+    sourceId: input.sourceId,
+    editionId: ctx.editionId,
+    mode,
+    changes,
+    findings: membership.findings,
+    agents: [skipped("normalization"), membership, skipped("person_facts")],
+    summary: {
+      mode,
+      agentMode: "membership_only",
+      importedRows: 0,
+      plannedRows: 0,
+      changes: changes.length,
+      repairs: mode === "apply" ? changes.length : 0,
+      plannedRepairs: changes.length,
+      unresolved: membership.findings.filter(f => f.status === "unresolved").length,
+      metrics: [ { agentKey: "membership", ...membership.metrics } ],
+    },
+  };
+}
