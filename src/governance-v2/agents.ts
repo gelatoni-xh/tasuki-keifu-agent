@@ -22,6 +22,7 @@ import {
   membershipConflict,
   normalizeName,
   normalizeOrganizationName,
+  normalizePersonDisplayNameJa,
   shouldUpdatePB,
   stableId,
 } from "./rules.js";
@@ -482,7 +483,7 @@ export async function normalizePeople(
         const target = {
           id,
           slug: `person-${id}`,
-          displayNameJa: split.name,
+          displayNameJa: normalizePersonDisplayNameJa(split.name),
           birthDate: row.birthDate,
         };
         out.changes.push({
@@ -531,7 +532,7 @@ export async function normalizePeople(
             entity: {
               id,
               slug: row.slug ?? `person-${id}`,
-              displayNameJa: row.name,
+              displayNameJa: normalizePersonDisplayNameJa(row.name),
               birthDate: row.birthDate,
             },
           },

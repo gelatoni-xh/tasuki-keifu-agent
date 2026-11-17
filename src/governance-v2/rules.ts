@@ -21,6 +21,12 @@ export const normalizeName = (s: string) =>
     .normalize("NFKC")
     .replace(/[\s・･]/gu, "")
     .toLocaleLowerCase("ja");
+export function normalizePersonDisplayNameJa(value: string) {
+  const normalized = value.replace(/　/g, " ").replace(/\s+/gu, " ").trim();
+  return /[\p{Script=Han}々]/u.test(normalized)
+    ? normalized.replace(/ /g, "")
+    : normalized;
+}
 export const normalizeOrganizationName = (s: string) =>
   normalizeName(s)
     .replace(/高等学校$/u, "高校")

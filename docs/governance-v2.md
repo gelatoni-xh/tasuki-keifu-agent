@@ -54,6 +54,10 @@ unitType 支持 leg/heat/group；sequence 非负且任务内唯一，按数字�
 
 Membership 可填 grade、startDate/endDate、endState。日期格式 YYYY-MM-DD；endState 默认为 unknown，不凭缺失结束日期当作 ongoing。普通职业团体/俱乐部不默认互斥；有明确业务依据时提供 exclusivityGroup=employment/team_registration。
 
+### 人物显示名契约
+
+人物输入 `rows[].name` 是来源显示名。进入人物归一化和 writer 后，含汉字的日文/中文姓名统一移除姓名中间空格；片假名、拉丁字母及其他非汉字姓名先折叠空白为一个半角空格并保留分隔。`displayNameJaSearch` 仍使用无空白的检索键。此规则只规范显示格式，不代表同名人物应合并；身份归并必须另有来源证据。
+
 ## 既有 payload 适配
 
 建立 eventspec.json：

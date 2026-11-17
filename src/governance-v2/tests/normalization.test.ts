@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
+import { normalizePeople } from "../agents.js";
 import { buildBatchGraph } from "../graph.js";
-import { manifestSchema, CONTRACT_VERSION, type Context } from "../contracts.js";
+import { manifestSchema, CONTRACT_VERSION, emptyMetrics, type Context } from "../contracts.js";
 import type { Researcher, ResearchRequest } from "../research.js";
 
 function input() {
@@ -19,6 +20,29 @@ function context(): Context {
     historicalResults: ["a", "b"].map(k => ({ id: `h${k}`, personId: `p${k}`, organizationId: "o1", organizationName: "試験高校", raceId: "old", raceSlug: "ordinary-332-heat-1", raceName: "普通", notes: "DNS", isStarter: false })),
   };
 }
+test("person graph plans compact kanji names and preserves non-kanji separators", async () => {
+  const data = input();
+  data.rows = [
+    { key: "han", name: "山田　太郎", organizationKey: "o", memberships: [], pbs: [] },
+    { key: "katakana", name: "ジョンソン モゲニ", organizationKey: "o", memberships: [], pbs: [] },
+    { key: "roman", name: "John Smith", organizationKey: "o", memberships: [], pbs: [] },
+  ];
+  const ctx = context();
+  ctx.people = [];
+  const result = await normalizePeople(
+    "b",
+    data,
+    ctx,
+    { organizationMap: { o: "o1" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+    async () => ({ evidence: [] }),
+  );
+  assert.deepEqual(
+    result.changes
+      .filter((c) => c.operation.kind === "create_person")
+      .map((c) => c.operation.kind === "create_person" && c.operation.entity.displayNameJa),
+    ["山田太郎", "ジョンソン モゲニ", "John Smith"],
+  );
+});
 function items(r: ResearchRequest) { return (r.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items; }
 const match: Researcher = async r => r.kind === "person_identity"
   ? { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立冲突需保留待确认", evidence: [], corrections: [], split: null }, evidence: [] }
