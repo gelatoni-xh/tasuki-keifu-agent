@@ -67,6 +67,27 @@ export class GovernanceDB {
     readonly pool: Pool,
     readonly readPool: Pool = pool,
   ) {}
+
+  async currentRacePersonMap(input: BatchInput): Promise<Record<string, string>> {
+    const c = await this.readPool.connect();
+    try {
+      const rows = (await c.query(
+        `SELECT rr."personId", rr.rank, rr.mark, rr."isStarter"
+         FROM public."RaceResult" rr JOIN public."Race" r ON r.id=rr."raceId"
+         WHERE r.slug=$1 AND rr."sourceId"=$2`,
+        [input.raceSlug, input.sourceId],
+      )).rows;
+      const out: Record<string, string> = {};
+      for (const row of input.rows) {
+        const matches = rows.filter((x) =>
+          String(x.rank ?? "") === String(row.rank ?? "") &&
+          String(x.mark ?? "") === String(row.mark ?? ""),
+        );
+        if (matches.length === 1 && matches[0].personId) out[row.key] = matches[0].personId;
+      }
+      return out;
+    } finally { c.release(); }
+  }
   async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const c = await this.pool.connect();
     try {

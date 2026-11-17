@@ -189,11 +189,12 @@ export class EventRunner {
             const fallback = context.organizations.filter(c => normalizeName(c.nameJa) === normalizeName(o.name));
             return [o.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
           }).filter(([, id]) => !!id) as Array<[string, string]>);
+          const currentRaceMap = await this.db.currentRacePersonMap(input);
           const personMap = Object.fromEntries(input.rows.map(row => {
             const sourceKey = row.sourceKey ?? `${input.raceSlug}:${row.key}`;
             const mapped = context.sourceMappings.find(m => m.entityType === "person" && m.sourceKey === sourceKey)?.personId;
             const fallback = context.people.filter(p => normalizeName(p.displayNameJa) === normalizeName(row.name));
-            return [row.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
+            return [row.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined) ?? currentRaceMap[row.key]];
           }).filter(([, id]) => !!id) as Array<[string, string]>);
           // Legacy race payloads often mark every source organization as unknown.
           // Membership-only reruns must use the already normalized business type.
