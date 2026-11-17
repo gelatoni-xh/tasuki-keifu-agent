@@ -23,6 +23,7 @@ import {
   normalizeName,
   normalizeOrganizationName,
   normalizePersonDisplayNameJa,
+  isMembershipOrganizationType,
   shouldUpdatePB,
   stableId,
 } from "./rules.js";
@@ -652,11 +653,34 @@ export async function governMemberships(
       ];
     }),
   );
-  const affected = new Set(input.rows.filter(row => !isDnsRow(row) && !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")).map(row => res.personMap[row.key]));
+  const affected = new Set(input.rows.filter(row => !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")).map(row => res.personMap[row.key]));
   for (const row of input.rows) {
-    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
+    if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
-    for (const hint of row.memberships) {
+    const implicitOrganization = row.organizationKey
+      ? input.organizations.find(o => o.key === row.organizationKey)
+      : undefined;
+    const implicitOrganizationId = implicitOrganization
+      ? res.organizationMap[implicitOrganization.key]
+      : undefined;
+    const hints = [...row.memberships];
+    if (implicitOrganization && implicitOrganizationId &&
+        isMembershipOrganizationType(implicitOrganization.type) &&
+        !hints.some(h => h.organizationKey === implicitOrganization.key)) {
+      hints.push({
+        organizationKey: implicitOrganization.key,
+        type: implicitOrganization.type === "corporate_team" ? "affiliated" : "enrolled",
+        endState: "unknown",
+      });
+    }
+    if (hints.length) {
+      out.metrics.membershipRowsConsidered = (out.metrics.membershipRowsConsidered ?? 0) + 1;
+      if (hints.length > row.memberships.length)
+        out.metrics.membershipImplicitHints = (out.metrics.membershipImplicitHints ?? 0) + 1;
+      if (isDnsRow(row))
+        out.metrics.membershipDnsRowsIncluded = (out.metrics.membershipDnsRowsIncluded ?? 0) + 1;
+    }
+    for (const hint of hints) {
       out.metrics.ruleDecisions++;
       const organizationId = res.organizationMap[hint.organizationKey];
       const existing = [...all.values()].filter(
@@ -868,6 +892,7 @@ export async function governMemberships(
           ),
         );
     }
+  out.metrics.membershipChangesPlanned = out.changes.filter(c => c.operation.kind === "membership").length;
   out.skipped = !out.changes.length && !out.findings.length;
   out.metrics.durationMs = Date.now() - started;
   return out;

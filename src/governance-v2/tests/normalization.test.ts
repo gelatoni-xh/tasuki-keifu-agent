@@ -88,7 +88,7 @@ test("person light triage routes a single plausible transcription to research an
     if (scenario === "weak_unresolved") assert.equal(result.resolution.metrics.personResearchRouting?.[0].reason, "low_identity_plausibility");
   }
 });
-test("whole unresolved group uses one person call; source plans are replaced; DNS creates no membership", async () => {
+test("whole unresolved group uses one person call; source plans are replaced; membership uses race representation", async () => {
   const calls: ResearchRequest[] = [];
   const graph = buildBatchGraph({ loadContext: async () => context(), research: async (r,m) => { calls.push(r); m.llmCalls++; return match(r,m); } });
   const result = await graph.invoke({ batchId: "b", input: input(), mode: "dry_run" });
@@ -97,7 +97,7 @@ test("whole unresolved group uses one person call; source plans are replaced; DN
   assert.ok(JSON.stringify(calls[0]).includes('"isStarter":false'));
   assert.deepEqual(result.resolution.personMap, { a: "pa", b: "pb" });
   assert.equal(result.plan.changes.filter(c => c.operation.kind === "create_person").length, 0);
-  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
+  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 2);
   assert.ok(result.plan.changes.filter(c => c.operation.kind === "source_mapping").every(c => c.operation.kind === "source_mapping" && !c.operation.targetId.startsWith("person-")));
   assert.equal(result.resolution.metrics.llmCalls, 2);
 });
@@ -324,7 +324,7 @@ test("historical DNS entry with exact name, kana and organization resolves by ru
   assert.deepEqual(result.resolution.metrics.normalizationRuleMatches?.[0].weakerCandidateIds, ["homophone"]);
   const refs = result.plan.changes.filter(c => c.operation.kind === "source_mapping" && c.operation.targetId === "pa");
   assert.ok(refs.some(c => c.evidence.some(e => e.sourceKey === "result:ha")));
-  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
+  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 2);
   assert.equal(ctx.historicalResults![0].isStarter, false);
 });
 
@@ -361,7 +361,7 @@ test("cross-check can reject a historical rule match without repeating lightweig
   assert.equal(calls.filter(r => r.kind === "normalization_light").length, 1);
 });
 
-test("current DNS bypasses identity calls and membership inference; historical DNS still identifies starters", async () => {
+test("current DNS bypasses identity calls but still creates source-backed membership", async () => {
   const data = input(), ctx = context(), calls: ResearchRequest[] = [];
   data.rows[0].notes = "DNS";
   data.rows[0].memberships = [{ organizationKey: "o", type: "enrolled", grade: 3, endState: "unknown" }];
@@ -369,7 +369,7 @@ test("current DNS bypasses identity calls and membership inference; historical D
   assert.deepEqual(items(calls.find(r => r.subjectRef === "person")!).map(i => i.itemKey), ["person_identity:b"]);
   assert.notEqual(result.resolution.personMap.a, "pa");
   assert.equal(result.resolution.personMap.b, "pb");
-  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 0);
+  assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 2);
   assert.equal(calls.filter(r => r.kind === "person_identity").length, 0);
 });
 

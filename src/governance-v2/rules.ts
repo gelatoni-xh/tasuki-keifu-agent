@@ -32,6 +32,13 @@ export const normalizeOrganizationName = (s: string) =>
     .replace(/高等学校$/u, "高校")
     .replace(/大学$/u, "大")
     .replace(/付属/gu, "附属");
+
+// Only organizations with a stable school or corporate-team identity can
+// create a Membership from a race representation. Clubs, companies,
+// prefecture selections and unknown labels remain race-result metadata.
+export function isMembershipOrganizationType(type: string | undefined) {
+  return ["junior_high_school", "high_school", "university", "corporate_team"].includes(type ?? "");
+}
 export function markMillis(raw: string): number | null {
   const s = raw.normalize("NFKC").trim();
   if (!/^\d+(?::[0-5]\d){0,2}(?:\.\d{1,3})?$/.test(s)) return null;

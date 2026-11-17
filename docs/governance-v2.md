@@ -52,7 +52,7 @@ unitType 支持 leg/heat/group；sequence 非负且任务内唯一，按数字�
 
 组织 key、行 key 任务批内分别唯一，所属引用必须在该批 organizations 里。结构损坏直接报错，不静默丢行。业务疑难允许未知日期、空 PB、未知组织类型；unresolved 不阻断有效输入导入。已撤回的第 103 回箱根预选数据仍不允许导入。
 
-Membership 可填 grade、startDate/endDate、endState。日期格式 YYYY-MM-DD；endState 默认为 unknown，不凭缺失结束日期当作 ongoing。普通职业团体/俱乐部不默认互斥；有明确业务依据时提供 exclusivityGroup=employment/team_registration。
+Membership 可填 grade、startDate/endDate、endState。日期格式 YYYY-MM-DD；endState 默认为 unknown，不凭缺失结束日期当作 ongoing。来源行没有显式 `memberships` 时，已确认的初中、高中、大学和实业团组织也会由参赛组织生成一条 Membership 观察；没有日期时先写入空日期记录，再用已有不重叠履历推理可解释的时间窗口。Club、company、unknown、地方代表和选拔队不自动生成 Membership。DNS 不代表实际出场，但只要来源给出了已确认学校或实业团，仍进入 Membership 治理。普通职业团体/俱乐部不默认互斥；有明确业务依据时提供 exclusivityGroup=employment/team_registration。
 
 ### 人物显示名契约
 
@@ -132,7 +132,7 @@ bash scripts/test-governance-integration.sh
 
 ## 下游依赖与观测修复（2026-11-13）
 
-当前来源行的 DNS（notes 或 mark）不进入选手轻量/深度研究，不据此推断 Membership 或更新人物事实；能够由安全规则确认的映射仍保留，否则保留独立来源档案与成绩状态。历史 DNS 仍可作为身份线索，不代表实际出场。
+当前来源行的 DNS（notes 或 mark）不进入选手轻量/深度身份研究，也不代表实际出场；但 DNS 的学校/实业团代表信息仍可作为 Membership 来源。能够由安全规则确认的映射仍保留，否则保留独立来源档案与成绩状态。历史 DNS 仍可作为身份线索。
 
 组织轻量/追加裁决仍未确认时，挂起该组织所有关联选手的暂定匹配，不能仅因组织 ID 未变化而跳过失效处理。未确认的依赖不进入选手追加复核或重型研究；确认后只复核受影响选手一次。交叉校验保留相关证据，移除其他组织/人物的已知无关引用；未知引用、越界目标仍是阻碍项。引用相关性检查是实体范围校验，不是对模型推理正确性的保证。
 

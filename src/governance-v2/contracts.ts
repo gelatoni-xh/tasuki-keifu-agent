@@ -330,6 +330,10 @@ export type Metrics = {
   organizationResearch?: Array<{ subjectRef: string; candidateCount: number; eligibility: "unresolved_light" | "cross_check_conflict"; result: string }>;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
   normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string; evidenceRefs?: string[]; reason?: string }>;
+  membershipRowsConsidered?: number;
+  membershipImplicitHints?: number;
+  membershipDnsRowsIncluded?: number;
+  membershipChangesPlanned?: number;
   normalizationRuleMatches?: Array<{ subjectRef: string; targetId: string; rule: string; evidenceRefs: string[]; weakerCandidateIds: string[] }>;
   researchCalls?: Array<{
     callId?: string; stage?: string; itemCount?: number;
