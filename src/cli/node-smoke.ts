@@ -52,21 +52,17 @@ async function main() {
   assertArrayEqual("not-found nodeHistory", notFound.state.runtimeNodeHistory, ["resolve_person"]);
   report.push({ label: "not-found", ok: true });
 
-  const ambiguousNormalization = await runPersonDiagnosis({
+  const sameKanaDifferentKanji = await runPersonDiagnosis({
     personSlug: "person-kantoic2026-39aa43d4854dfb296157",
   });
-  if (!ambiguousNormalization.state.runtimeNodeHistory.includes("research_name_identity")) {
-    throw new Error("ambiguous-normalization did not enter research_name_identity");
+  if (sameKanaDifferentKanji.state.runtimeNodeHistory.includes("research_name_identity")) {
+    throw new Error("same-kana-different-kanji unexpectedly entered research_name_identity");
   }
-  const researchFinding = ambiguousNormalization.state.findings.find(
-    (item) => item.node === "research_name_identity",
-  );
-  if (researchFinding && !["duplicate_normalized_name", "name_identity_uncertain"].includes(researchFinding.code)) {
-    throw new Error(`unexpected research finding code: ${researchFinding.code}`);
+  if (sameKanaDifferentKanji.state.findings.some((item) => item.code === "duplicate_normalized_name")) {
+    throw new Error("same-kana-different-kanji unexpectedly produced duplicate_normalized_name");
   }
   report.push({
-    label: "ambiguous-normalization",
-    researchFindingCode: researchFinding?.code ?? null,
+    label: "same-kana-different-kanji",
     ok: true,
   });
 

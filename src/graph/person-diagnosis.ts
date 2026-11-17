@@ -433,6 +433,21 @@ function collectEvidenceIds(value: unknown, key: "membershipId" | "personalBestI
   return [...ids].sort();
 }
 
+function hasUnresolvedMembershipConflict(state: PersonDiagnosisState, action: SuggestedAction) {
+  if (action.code !== "mark_memberships_conflicting") {
+    return true;
+  }
+
+  const relatedFindings = state.findings.filter((finding) => action.relatedIssueCodes.includes(finding.code));
+  const membershipIds = collectEvidenceIds(relatedFindings.map((finding) => finding.evidence), "membershipId");
+  if (membershipIds.length === 0) {
+    return false;
+  }
+
+  const statuses = new Map(state.memberships.map((membership) => [membership.membershipId, membership.status]));
+  return membershipIds.some((membershipId) => statuses.get(membershipId) !== "conflicting");
+}
+
 function buildActionPlanNode(state: PersonDiagnosisState) {
   const actionsByCode: Record<string, SuggestedAction> = {
     profile_wikipedia_data_available: {
@@ -509,14 +524,7 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       title: "Mark conflicting personal bests",
       priority: "low",
       rationale: "PB conflicts without Wikipedia evidence should not remain trusted until reviewed.",
-      relatedIssueCodes: ["duplicate_personal_bests", "conflicting_personal_best"],
-    },
-    conflicting_personal_best: {
-      code: "mark_personal_bests_conflicting",
-      title: "Mark conflicting personal bests",
-      priority: "low",
-      rationale: "PB conflicts without Wikipedia evidence should not remain trusted until reviewed.",
-      relatedIssueCodes: ["duplicate_personal_bests", "conflicting_personal_best"],
+      relatedIssueCodes: ["duplicate_personal_bests"],
     },
   };
 
@@ -525,7 +533,7 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
 
   for (const issue of state.findings) {
     const action = actionsByCode[issue.code];
-    if (!action || seen.has(action.code)) {
+    if (!action || seen.has(action.code) || !hasUnresolvedMembershipConflict(state, action)) {
       continue;
     }
 
@@ -572,6 +580,16 @@ function buildActionPlanNode(state: PersonDiagnosisState) {
       relatedIssueCodes: ["duplicate_normalized_name"],
     });
   }
+
+  const actionOrder: Record<string, number> = {
+    merge_person_duplicate: 1,
+    mark_memberships_conflicting: 2,
+    upsert_personal_bests_from_wikipedia: 3,
+    mark_personal_bests_conflicting: 4,
+    backfill_profile_from_wikipedia: 5,
+    review_name_normalization: 99,
+  };
+  actions.sort((left, right) => (actionOrder[left.code] ?? 50) - (actionOrder[right.code] ?? 50));
 
   const summary =
     actions.length === 0

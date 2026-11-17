@@ -10,6 +10,11 @@ import type {
   PersonalBestSnapshot,
   RelationCacheSnapshot,
 } from "../types/diagnosis.js";
+import type {
+  OrganizationCandidate,
+  OrganizationProfile,
+  OrganizationReferenceStats,
+} from "../types/organization-diagnosis.js";
 
 type PersonRow = {
   id: string;
@@ -27,6 +32,7 @@ type PersonRow = {
   type: string;
   status: string;
   notes: string | null;
+  createdAt: Date;
   updatedAt: Date;
 };
 
@@ -41,10 +47,12 @@ export type GovernanceCandidate = {
   personSlug: string;
   displayNameJa: string;
   businessUpdatedAt: string;
+  priority: number;
 };
 
 export async function listGovernanceCandidates(input: {
   limit: number;
+  personSlug?: string;
   client?: QueryClient;
 }): Promise<GovernanceCandidate[]> {
   const client = getQueryClient(input.client);
@@ -53,30 +61,86 @@ export async function listGovernanceCandidates(input: {
     personSlug: string;
     displayNameJa: string;
     businessUpdatedAt: Date;
+    priority: number;
   }>(
     `
+      WITH scored_candidates AS (
+        SELECT
+          p."id" AS "personId",
+          p."slug" AS "personSlug",
+          p."displayNameJa",
+          p."displayNameJaSearch",
+          GREATEST(
+            p."updatedAt",
+            COALESCE((
+              SELECT MAX(m."updatedAt")
+              FROM "Membership" m
+              WHERE m."personId" = p."id"
+            ), p."updatedAt"),
+            COALESCE((
+              SELECT MAX(pb."updatedAt")
+              FROM "PersonalBest" pb
+              WHERE pb."personId" = p."id"
+            ), p."updatedAt")
+          ) AS "businessUpdatedAt",
+          CASE
+            -- Exact normalized-name collisions can lead to a person merge and are held before any write.
+            WHEN p."displayNameJaSearch" <> ''
+              AND EXISTS (
+                SELECT 1
+                FROM "Person" other
+                WHERE other."id" <> p."id"
+                  AND other."displayNameJaSearch" = p."displayNameJaSearch"
+              )
+              THEN 1
+            -- Multiple current memberships are safe to isolate by marking the related rows conflicting.
+            WHEN (
+              SELECT COUNT(*)
+              FROM "Membership" m
+              WHERE m."personId" = p."id"
+                AND (m."startDate" IS NULL OR m."startDate" <= CURRENT_DATE)
+                AND (m."endDate" IS NULL OR m."endDate" >= CURRENT_DATE)
+            ) > 1
+              THEN 2
+            -- Only prioritize duplicate PB rows that have not already been isolated as conflicting.
+            WHEN EXISTS (
+              SELECT 1
+              FROM "PersonalBest" pb
+              WHERE pb."personId" = p."id"
+                AND pb."status" <> 'conflicting'
+              GROUP BY pb."discipline", COALESCE(pb."markMillis"::text, pb."mark")
+              HAVING COUNT(*) > 1
+            )
+              THEN 3
+            ELSE 9
+          END AS "priority"
+        FROM "Person" p
+      ),
+      ranked_candidates AS (
+        SELECT
+          *,
+          ROW_NUMBER() OVER (
+            PARTITION BY CASE
+              WHEN "priority" = 1 THEN "displayNameJaSearch"
+              ELSE "personId"
+            END
+            ORDER BY "businessUpdatedAt" ASC, "personId" ASC
+          ) AS "groupRank"
+        FROM scored_candidates
+      )
       SELECT
-        p."id" AS "personId",
-        p."slug" AS "personSlug",
-        p."displayNameJa",
-        GREATEST(
-          p."updatedAt",
-          COALESCE((
-            SELECT MAX(m."updatedAt")
-            FROM "Membership" m
-            WHERE m."personId" = p."id"
-          ), p."updatedAt"),
-          COALESCE((
-            SELECT MAX(pb."updatedAt")
-            FROM "PersonalBest" pb
-            WHERE pb."personId" = p."id"
-          ), p."updatedAt")
-        ) AS "businessUpdatedAt"
-      FROM "Person" p
-      ORDER BY "businessUpdatedAt" ASC, p."id" ASC
+        "personId",
+        "personSlug",
+        "displayNameJa",
+        "businessUpdatedAt",
+        "priority"
+      FROM ranked_candidates
+      WHERE "groupRank" = 1
+        AND ($2::text IS NULL OR "personSlug" = $2)
+      ORDER BY "priority" ASC, "businessUpdatedAt" ASC, "personId" ASC
       LIMIT $1
     `,
-    [input.limit],
+    [input.limit, input.personSlug ?? null],
   );
 
   return rows.map((row) => ({
@@ -84,6 +148,7 @@ export async function listGovernanceCandidates(input: {
     personSlug: row.personSlug,
     displayNameJa: row.displayNameJa,
     businessUpdatedAt: row.businessUpdatedAt.toISOString(),
+    priority: row.priority,
   }));
 }
 
@@ -483,4 +548,197 @@ export async function countDuplicateNormalizedNames(input: {
   );
 
   return Number.parseInt(rows[0]?.count ?? "0", 10);
+}
+
+type OrganizationRow = {
+  id: string;
+  slug: string;
+  nameJa: string;
+  nameKana: string | null;
+  nameRoman: string | null;
+  nameZh: string | null;
+  nameEn: string | null;
+  shortName: string | null;
+  type: string;
+  location: string | null;
+  prefecture: string | null;
+  country: string;
+  websiteUrl: string | null;
+  status: string;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+function toOrganizationCandidate(row: OrganizationRow): OrganizationCandidate {
+  return {
+    organizationId: row.id,
+    organizationSlug: row.slug,
+    nameJa: row.nameJa,
+    nameKana: row.nameKana,
+    nameRoman: row.nameRoman,
+    type: row.type,
+  };
+}
+
+export async function resolveOrganizationCandidates(input: {
+  organizationId?: string | null;
+  organizationSlug?: string | null;
+  organizationName?: string | null;
+  client?: QueryClient;
+}): Promise<OrganizationCandidate[]> {
+  const client = getQueryClient(input.client);
+  const clauses: string[] = [];
+  const params: string[] = [];
+
+  if (input.organizationId) {
+    params.push(input.organizationId);
+    clauses.push(`o."id" = $${params.length}`);
+  }
+  if (input.organizationSlug) {
+    params.push(input.organizationSlug);
+    clauses.push(`o."slug" = $${params.length}`);
+  }
+  if (input.organizationName) {
+    const normalized = normalizeSearchKey(input.organizationName);
+    params.push(normalized);
+    clauses.push(`regexp_replace(LOWER(o."nameJa"), '\\s+', '', 'g') = $${params.length}`);
+    params.push(input.organizationName);
+    clauses.push(`LOWER(COALESCE(o."nameRoman", '')) = LOWER($${params.length})`);
+    params.push(input.organizationName);
+    clauses.push(`LOWER(COALESCE(o."nameKana", '')) = LOWER($${params.length})`);
+  }
+  if (clauses.length === 0) {
+    return [];
+  }
+
+  const { rows } = await client.query<OrganizationRow>(
+    `
+      SELECT
+        o."id", o."slug", o."nameJa", o."nameKana", o."nameRoman",
+        o."nameZh", o."nameEn", o."shortName", o."type", o."location",
+        o."prefecture", o."country", o."websiteUrl", o."status", o."notes", o."createdAt", o."updatedAt"
+      FROM "Organization" o
+      WHERE ${clauses.join(" OR ")}
+      ORDER BY o."updatedAt" DESC, o."nameJa" ASC
+      LIMIT 20
+    `,
+    params,
+  );
+
+  return rows.map(toOrganizationCandidate);
+}
+
+export async function loadOrganizationSnapshot(input: {
+  organizationId: string;
+  client?: QueryClient;
+}): Promise<{ organization: OrganizationProfile; referenceStats: OrganizationReferenceStats }> {
+  const client = getQueryClient(input.client);
+  const [organizationResult, referencesResult] = await Promise.all([
+    client.query<OrganizationRow>(
+      `
+        SELECT
+          o."id", o."slug", o."nameJa", o."nameKana", o."nameRoman",
+          o."nameZh", o."nameEn", o."shortName", o."type", o."location",
+          o."prefecture", o."country", o."websiteUrl", o."status", o."notes", o."createdAt", o."updatedAt"
+        FROM "Organization" o
+        WHERE o."id" = $1
+        LIMIT 1
+      `,
+      [input.organizationId],
+    ),
+    client.query<{
+      membershipCount: string;
+      personalBestCount: string;
+      raceResultCount: string;
+      teamCompetitionResultCount: string;
+      nameVariantCount: string;
+      sourceReferenceCount: string;
+    }>(
+      `
+        SELECT
+          (SELECT COUNT(*)::text FROM "Membership" WHERE "organizationId" = $1) AS "membershipCount",
+          (SELECT COUNT(*)::text FROM "PersonalBest" WHERE "organizationId" = $1) AS "personalBestCount",
+          (SELECT COUNT(*)::text FROM "RaceResult" WHERE "organizationId" = $1) AS "raceResultCount",
+          (SELECT COUNT(*)::text FROM "TeamCompetitionResult" WHERE "organizationId" = $1) AS "teamCompetitionResultCount",
+          (SELECT COUNT(*)::text FROM "NameVariant" WHERE "organizationId" = $1) AS "nameVariantCount",
+          (SELECT COUNT(*)::text FROM "SourceReference" WHERE "organizationId" = $1) AS "sourceReferenceCount"
+      `,
+      [input.organizationId],
+    ),
+  ]);
+
+  const row = organizationResult.rows[0];
+  if (!row) {
+    throw new Error(`organization_not_found:${input.organizationId}`);
+  }
+  const references = referencesResult.rows[0];
+  if (!references) {
+    throw new Error(`organization_reference_stats_not_found:${input.organizationId}`);
+  }
+
+  return {
+    organization: {
+      ...toOrganizationCandidate(row),
+      nameZh: row.nameZh,
+      nameEn: row.nameEn,
+      shortName: row.shortName,
+      location: row.location,
+      prefecture: row.prefecture,
+      country: row.country,
+      websiteUrl: row.websiteUrl,
+      status: row.status,
+      notes: row.notes,
+      createdAt: toIsoString(row.createdAt) ?? new Date().toISOString(),
+      updatedAt: toIsoString(row.updatedAt) ?? new Date().toISOString(),
+    },
+    referenceStats: {
+      membershipCount: Number.parseInt(references.membershipCount, 10),
+      personalBestCount: Number.parseInt(references.personalBestCount, 10),
+      raceResultCount: Number.parseInt(references.raceResultCount, 10),
+      teamCompetitionResultCount: Number.parseInt(references.teamCompetitionResultCount, 10),
+      nameVariantCount: Number.parseInt(references.nameVariantCount, 10),
+      sourceReferenceCount: Number.parseInt(references.sourceReferenceCount, 10),
+    },
+  };
+}
+
+export async function findOrganizationNormalizationCandidates(input: {
+  organizationId: string;
+  nameJa: string;
+  client?: QueryClient;
+}): Promise<OrganizationCandidate[]> {
+  const client = getQueryClient(input.client);
+  const { rows } = await client.query<OrganizationRow>(
+    `
+      WITH target_names AS (
+        SELECT regexp_replace(LOWER(o."nameJa"), '\\s+', '', 'g') AS "normalizedName"
+        FROM "Organization" o
+        WHERE o."id" = $1
+        UNION
+        SELECT regexp_replace(LOWER(nv."value"), '\\s+', '', 'g') AS "normalizedName"
+        FROM "NameVariant" nv
+        WHERE nv."organizationId" = $1
+      )
+      SELECT
+        o."id", o."slug", o."nameJa", o."nameKana", o."nameRoman",
+        o."nameZh", o."nameEn", o."shortName", o."type", o."location",
+        o."prefecture", o."country", o."websiteUrl", o."status", o."notes", o."createdAt", o."updatedAt"
+      FROM "Organization" o
+      WHERE o."id" <> $1
+        AND (
+          regexp_replace(LOWER(o."nameJa"), '\\s+', '', 'g') IN (SELECT "normalizedName" FROM target_names)
+          OR EXISTS (
+            SELECT 1
+            FROM "NameVariant" nv
+            WHERE nv."organizationId" = o."id"
+              AND regexp_replace(LOWER(nv."value"), '\\s+', '', 'g') IN (SELECT "normalizedName" FROM target_names)
+          )
+        )
+      ORDER BY o."updatedAt" DESC, o."nameJa" ASC
+      LIMIT 10
+    `,
+    [input.organizationId],
+  );
+  return rows.map(toOrganizationCandidate);
 }

@@ -4,7 +4,7 @@ import {
   loadPersonSnapshot,
   resolvePersonCandidates,
 } from "../db/business-queries.js";
-import { normalizeJaMediumKey, normalizeKanaMediumKey, normalizeSearchKey } from "../lib/normalize.js";
+import { normalizeSearchKey } from "../lib/normalize.js";
 import type { NormalizationRiskStatus } from "../types/diagnosis.js";
 
 export type ToolResult<T> = {
@@ -260,16 +260,10 @@ export async function auditPersonNormalizationRiskTool(input: {
     for (const candidate of candidates) {
       const jaExactMatch = candidate.displayNameJa.toLowerCase() === displayNameJa.toLowerCase();
       const jaNormalizedMatch = normalizeSearchKey(candidate.displayNameJa) === normalizeSearchKey(displayNameJa);
-      const jaMediumMatch = normalizeJaMediumKey(candidate.displayNameJa) === normalizeJaMediumKey(displayNameJa);
-      const kanaMediumMatch = typeof displayNameKana === "string"
-        && typeof candidate.displayNameKana === "string"
-        && normalizeKanaMediumKey(candidate.displayNameKana) === normalizeKanaMediumKey(displayNameKana);
 
       const reasons = [
         jaExactMatch ? "display_name_ja_exact" : null,
         !jaExactMatch && jaNormalizedMatch ? "display_name_ja_normalized" : null,
-        !jaNormalizedMatch && jaMediumMatch ? "display_name_ja_medium" : null,
-        kanaMediumMatch ? "display_name_kana_medium" : null,
       ].filter((item): item is string => Boolean(item));
 
       if (jaExactMatch || jaNormalizedMatch) {
@@ -281,13 +275,6 @@ export async function auditPersonNormalizationRiskTool(input: {
         continue;
       }
 
-      if (jaMediumMatch || kanaMediumMatch) {
-        assessedCandidates.push({
-          ...candidate,
-          reasons,
-          matchClass: "ambiguous" as const,
-        });
-      }
     }
 
     const candidateCount = assessedCandidates.length;

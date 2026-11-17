@@ -1,0 +1,25 @@
+# Use an image built from this Agent checkout after the main DB migration.
+services:
+  governance-worker:
+    image: ${GOVERNANCE_IMAGE:?Set GOVERNANCE_IMAGE}
+    command: ["node", "--import", "tsx", "src/governance-v2/cli.ts", "worker"]
+    env_file: .env.governance
+    restart: unless-stopped
+    stop_grace_period: 60s
+    volumes:
+      - governance-payloads:/var/lib/tasuki-governance/payloads
+    networks: [tasuki]
+  governance-mail:
+    profiles: [mail]
+    image: ${GOVERNANCE_IMAGE:?Set GOVERNANCE_IMAGE}
+    command: ["node", "--import", "tsx", "src/governance-v2/cli.ts", "mail-worker"]
+    env_file: .env.governance
+    restart: unless-stopped
+    stop_grace_period: 60s
+    networks: [tasuki]
+volumes:
+  governance-payloads:
+networks:
+  tasuki:
+    external: true
+    name: ${TASUKI_NETWORK:?Set the existing business DB network}

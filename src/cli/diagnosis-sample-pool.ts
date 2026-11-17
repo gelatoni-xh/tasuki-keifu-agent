@@ -47,7 +47,7 @@ export const diagnosisSamplePool: DiagnosisSampleCase[] = [
     expectedRuntimeStatus: "completed",
     expectedResolutionStatus: "unique",
     expectedIssueCodes: ["profile_coverage_missing_fields", "multiple_current_memberships"],
-    expectedActionCodes: ["review_membership_timeline"],
+    expectedActionCodes: ["mark_memberships_conflicting"],
   },
   {
     label: "pb-conflict",
@@ -58,7 +58,7 @@ export const diagnosisSamplePool: DiagnosisSampleCase[] = [
       "profile_coverage_missing_fields",
       "conflicting_personal_best",
     ],
-    expectedActionCodes: ["review_personal_bests"],
+    expectedActionCodes: [],
   },
   {
     label: "membership-boundary",

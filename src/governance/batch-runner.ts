@@ -21,6 +21,7 @@ const logger = createLogger("governance-batch-runner");
 export type RunGovernanceBatchInput = {
   limit?: number;
   dryRun?: boolean;
+  personSlug?: string;
 };
 
 type BatchSubjectResult = {
@@ -204,6 +205,7 @@ async function runSubject(input: {
 export async function runGovernanceBatch(input: RunGovernanceBatchInput = {}) {
   const batchId = randomUUID();
   const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
+  const personSlug = input.personSlug?.trim() || undefined;
   const requestedDryRun = input.dryRun ?? true;
   const dryRun = requestedDryRun || !isWriteEnabled() || !isWriteConfigured();
 
@@ -222,16 +224,24 @@ export async function runGovernanceBatch(input: RunGovernanceBatchInput = {}) {
       requestedDryRun,
       writeEnabled: isWriteEnabled(),
       writeConfigured: isWriteConfigured(),
+      candidatePolicy: "known_anomalies_first",
+      personSlug: personSlug ?? null,
     },
   });
 
   try {
-    // Fetch extra candidates because recently governed people are filtered in the agent database.
-    const candidates = await listGovernanceCandidates({ limit: Math.min(limit * 4, 400) });
+    // Candidate eligibility is finalized in the agent database, so scan a wider ordered window
+    // after a previous batch may have already consumed the highest-priority groups.
+    const candidates = await listGovernanceCandidates({
+      limit: personSlug ? 1 : Math.min(limit * 20, 400),
+      personSlug,
+    });
     const dueCandidates: GovernanceCandidate[] = [];
 
     for (const candidate of candidates) {
-      if (await isDueForGovernance(candidate)) {
+      // A named person is an explicit, controlled target. Idempotency still protects
+      // already-succeeded actions; write-mode and high-risk safeguards still apply.
+      if (personSlug || await isDueForGovernance(candidate)) {
         dueCandidates.push(candidate);
       }
       if (dueCandidates.length >= limit) {
@@ -264,6 +274,8 @@ export async function runGovernanceBatch(input: RunGovernanceBatchInput = {}) {
     const summary = {
       batchId,
       dryRun,
+      candidatePolicy: "known_anomalies_first",
+      personSlug: personSlug ?? null,
       candidateCount: dueCandidates.length,
       completedCount: subjects.filter((item) => item.status === "completed").length,
       heldCount: subjects.filter((item) => item.status === "held").length,

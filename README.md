@@ -5,6 +5,7 @@ Internal LangGraph-based agent for `tasuki-keifu` data diagnosis.
 V1 scope:
 
 - `person diagnosis graph`
+- `organization diagnosis graph`（组织归一化与关联影响评估；第一版只读）
 - read-only access to the main `tasuki_keifu` business database
 - write runtime data to the separate `tasuki_keifu_agent` database
 - structured findings and suggested manual actions
@@ -39,6 +40,7 @@ Set:
 pnpm diagnose -- --person-slug example-person
 pnpm diagnose -- --person-id cmxxxx
 pnpm diagnose -- --person-name "選手名"
+npm run diagnose:organization -- --organization-slug example-organization
 npm run inspect -- --limit 5
 npm run inspect -- --person-slug example-person
 ```
@@ -65,14 +67,27 @@ The current release records diagnosis results, action bundles, risk holds, and b
 ```bash
 npm run governance:batch -- --limit 20
 npm run governance:batch -- --limit 20 --execute
+npm run governance:batch -- --person-slug kitsuki-rin
+npm run governance:batch -- --person-slug kitsuki-rin --execute
 ```
 
 The batch runner compares the latest `Person` / `Membership` / `PersonalBest` update with the person's most recent finalized governance run. A risk-held result is finalized too, so unchanged cases are not repeatedly re-run.
 
 - Default mode is dry-run.
 - `--execute` still remains dry-run unless both `TASUKI_AGENT_WRITE_ENABLED=true` and `TASUKI_KEIFU_BUSINESS_WRITE_DATABASE_URL` are configured.
+- `--person-slug` creates a controlled one-person run. It bypasses only the normal “already governed” selection filter, so an idempotent action can be verified again; it does not bypass write-mode or high-risk safeguards.
 - `merge_person_duplicate` merges one LLM-confirmed, normalized-name-identical pair with a clear non-temporary canonical slug. The executor locks both people, moves related records, preserves name variants, clears relation caches, writes a business `AuditLog`, then removes the duplicate in one transaction.
 - `backfill_profile_from_wikipedia` fills only missing profile fields from an exact-match Wikipedia page.
 - `upsert_personal_bests_from_wikipedia` writes explicit Wikipedia PBs, preserving existing stage-specific PBs when a discipline already has multiple records.
 - `mark_memberships_conflicting` and `mark_personal_bests_conflicting` mark internally inconsistent records as `conflicting` without deleting records or guessing replacement facts.
 - A high-risk person is held without affecting the rest of the batch.
+
+## Organization Diagnosis
+
+```bash
+npm run diagnose:organization -- --organization-slug example-organization
+npm run diagnose:organization -- --organization-name "青山学院大学"
+npm run diagnose:organization -- --organization-slug example-organization --execute
+```
+
+`organization_diagnosis` is a separate single-organization graph. It checks optional coverage, exact matches across official names and stored name variants, and the footprint across memberships, PBs, results, name variants, and source mappings. An exact-match Japanese Wikipedia page can suggest a missing official website or prefecture. `--execute` can write these low-risk empty-field backfills and a single LLM-confirmed, deterministically canonical organization merge when both business write safeguards are enabled. Multi-candidate or unresolved organization merges remain held for review.

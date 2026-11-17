@@ -99,20 +99,20 @@ async function main() {
   );
   report.push({ tool: "auditPersonNormalizationRiskTool", ok: true });
 
-  const ambiguousNormalization = await auditPersonNormalizationRiskTool({
+  const sameKanaDifferentKanji = await auditPersonNormalizationRiskTool({
     personId: await resolveUniquePersonId("person-kantoic2026-39aa43d4854dfb296157"),
     personSlug: "person-kantoic2026-39aa43d4854dfb296157",
     displayNameJa: "木村涼太",
     displayNameKana: "キムラ リョウタ",
   });
   if (
-    !ambiguousNormalization.ok ||
-    ambiguousNormalization.data?.riskStatus !== "ambiguous" ||
-    (ambiguousNormalization.data.candidates?.length ?? 0) === 0
+    !sameKanaDifferentKanji.ok ||
+    sameKanaDifferentKanji.data?.riskStatus !== "no_risk" ||
+    (sameKanaDifferentKanji.data.candidates?.length ?? 0) !== 0
   ) {
-    throw new Error("auditPersonNormalizationRiskTool ambiguous case failed");
+    throw new Error("auditPersonNormalizationRiskTool same-kana-different-kanji case failed");
   }
-  report.push({ tool: "auditPersonNormalizationRiskTool", label: "ambiguous", ok: true });
+  report.push({ tool: "auditPersonNormalizationRiskTool", label: "same-kana-different-kanji", ok: true });
 
   const personalBestConsistency = await auditPersonalBestConsistencyTool({
     personId: await resolveUniquePersonId("nakano-shota"),
