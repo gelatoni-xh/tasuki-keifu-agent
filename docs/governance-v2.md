@@ -22,6 +22,7 @@
   "requestKey": "event-2024-pilot-dry-v1",
   "eventEditionId": "existing-edition-id",
   "mode": "dry_run",
+    "agentMode": "full",
   "batches": [
     {
       "unitType": "leg",
@@ -47,6 +48,8 @@
   ]
 }
 ```
+
+已完成赛事的补充治理可以将 `agentMode` 设为 `membership_only`。该模式复用已有来源映射和业务档案，只执行 Membership 规则及真实时间冲突研究，不重新执行成绩、人物和组织归一化，也不重复写入成绩。
 
 unitType 支持 leg/heat/group；sequence 非负且任务内唯一，按数字排序。多区/组添加 batches，各批显式给自己的 raceSlug/来源/行键；不猜数组顺序。sourceKey 只有来源确实提供稳定人物 ID 时才填，不能将姓名或跨赛事不稳定行号冒充人物 ID。缺失时生成来源赛事观察映射，仍可利用姓名/学校等证据归一。
 

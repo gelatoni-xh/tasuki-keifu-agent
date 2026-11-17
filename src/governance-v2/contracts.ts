@@ -137,6 +137,7 @@ export const manifestSchema = z
     requestKey: text,
     eventEditionId: text,
     mode: z.enum(["dry_run", "apply"]).default("dry_run"),
+    agentMode: z.enum(["full", "membership_only"]).default("full"),
     batches: z.array(batchInputSchema).min(1),
   })
   .strict()

@@ -38,7 +38,7 @@ export type Task = {
   id: string;
   mode: Manifest["mode"];
   status: string;
-  inputManifest: { version: string; eventEditionId: string };
+  inputManifest: { version: string; eventEditionId: string; agentMode?: "full" | "membership_only" };
   leaseToken: string;
   manifestHash: string;
 };
@@ -102,6 +102,7 @@ export class GovernanceDB {
         version: manifest.version,
         eventEditionId: manifest.eventEditionId,
         batchCount: manifest.batches.length,
+        agentMode: manifest.agentMode,
       };
       const ins = await c.query(
         'INSERT INTO governance."EventImportTask" (id,"requestKey","manifestHash",mode,"inputManifest") VALUES($1,$2,$3,$4,$5) ON CONFLICT("requestKey") DO NOTHING RETURNING id',

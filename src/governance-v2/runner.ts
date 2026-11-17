@@ -15,9 +15,11 @@ import {
   type ResearchConfig,
   type Researcher,
 } from "./research.js";
-import type { Plan } from "./contracts.js";
+import { emptyMetrics, type Plan, type Resolution } from "./contracts.js";
 import type { PayloadStore } from "./storage.js";
 import { BusinessWriter } from "./writer.js";
+import { buildMembershipOnlyPlan } from "./agents.js";
+import { normalizeName } from "./rules.js";
 import { enqueueReport, needsAttention, type Report } from "./notifications.js";
 
 export type RunnerOptions = {
@@ -179,11 +181,25 @@ export class EventRunner {
         let plan: Plan;
         if (snapshot.values?.plan && !snapshot.next.length)
           plan = snapshot.values.plan;
-        else {
+        else if (task.inputManifest.agentMode === "membership_only") {
+          const context = await this.db.loadContext(task, input);
+          const organizationMap = Object.fromEntries(input.organizations.map(o => {
+            const sourceKey = o.sourceKey ?? `org:${normalizeName(o.name)}`;
+            const mapped = context.sourceMappings.find(m => m.entityType === "organization" && m.sourceKey === sourceKey)?.organizationId;
+            const fallback = context.organizations.filter(c => normalizeName(c.nameJa) === normalizeName(o.name));
+            return [o.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
+          }).filter(([, id]) => !!id) as Array<[string, string]>);
+          const personMap = Object.fromEntries(input.rows.map(row => {
+            const sourceKey = row.sourceKey ?? `${input.raceSlug}:${row.key}`;
+            const mapped = context.sourceMappings.find(m => m.entityType === "person" && m.sourceKey === sourceKey)?.personId;
+            const fallback = context.people.filter(p => normalizeName(p.displayNameJa) === normalizeName(row.name));
+            return [row.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
+          }).filter(([, id]) => !!id) as Array<[string, string]>);
+          const resolution: Resolution = { organizationMap, personMap, findings: [], changes: [], metrics: emptyMetrics() };
+          plan = await buildMembershipOnlyPlan(batch.id, input, context, resolution, task.mode, research);
+        } else {
           const result = await graph.invoke(
-            snapshot.values?.batchId
-              ? null
-              : { batchId: batch.id, input, mode: task.mode },
+            snapshot.values?.batchId ? null : { batchId: batch.id, input, mode: task.mode },
             config,
           );
           plan = result.plan;
