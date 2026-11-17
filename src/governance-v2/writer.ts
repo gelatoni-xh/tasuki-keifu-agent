@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { RULE_VERSION, type Change, type Operation, type Plan } from "./contracts.js";
 import { GovernanceDB, iso, StalePlanError, type Task } from "./database.js";
-import { markMillis, normalizeName, stableId } from "./rules.js";
+import {
+  markMillis,
+  normalizeName,
+  normalizePersonDisplayNameJa,
+  stableId,
+} from "./rules.js";
 
 const tables = {
   person: "Person",
@@ -141,13 +146,16 @@ export class BusinessWriter {
       case "create_person": {
         entityType = "Person";
         entityId = op.entity.id;
+        const displayNameJa = normalizePersonDisplayNameJa(
+          op.entity.displayNameJa,
+        );
         const existing = (
           await c.query('SELECT * FROM public."Person" WHERE id=$1', [entityId])
         ).rows[0];
         if (existing) {
           if (
             normalizeName(existing.displayNameJa) !==
-            normalizeName(op.entity.displayNameJa)
+            normalizeName(displayNameJa)
           )
             throw new StalePlanError(`person:${entityId}`);
           break;
@@ -162,8 +170,8 @@ export class BusinessWriter {
           [
             entityId,
             collision ? `${op.entity.slug}-${entityId}` : op.entity.slug,
-            op.entity.displayNameJa,
-            normalizeName(op.entity.displayNameJa),
+            displayNameJa,
+            normalizeName(displayNameJa),
             op.entity.birthDate ?? null,
           ],
         );
@@ -559,13 +567,14 @@ async function split(
     ])
   ).rowCount;
   if (!from) throw new StalePlanError(`person:${op.fromPersonId}`);
+  const displayNameJa = normalizePersonDisplayNameJa(op.target.displayNameJa);
   await c.query(
     'INSERT INTO public."Person" (id,slug,"displayNameJa","displayNameJaSearch","birthDate","updatedAt") VALUES($1,$2,$3,$4,$5,clock_timestamp())',
     [
       op.target.id,
       op.target.slug,
-      op.target.displayNameJa,
-      normalizeName(op.target.displayNameJa),
+      displayNameJa,
+      normalizeName(displayNameJa),
       op.target.birthDate ?? null,
     ],
   );
