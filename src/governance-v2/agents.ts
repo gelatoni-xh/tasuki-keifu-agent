@@ -656,7 +656,11 @@ export async function governMemberships(
   const affected = new Set(input.rows.filter(row => !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")).map(row => res.personMap[row.key]));
   for (const row of input.rows) {
     if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
-    const personId = res.personMap[row.key];
+    // Membership-only reruns may lack the historical source mapping created by
+    // the original import. Reuse the canonical name match before deriving a
+    // provisional ID; the latter is not a valid business Person reference.
+    const personId = res.personMap[row.key] ??
+      ctx.people.find((p) => normalizeName(p.displayNameJa) === normalizeName(row.name))?.id;
     const implicitOrganization = row.organizationKey
       ? input.organizations.find(o => o.key === row.organizationKey)
       : undefined;
@@ -680,9 +684,30 @@ export async function governMemberships(
       if (isDnsRow(row))
         out.metrics.membershipDnsRowsIncluded = (out.metrics.membershipDnsRowsIncluded ?? 0) + 1;
     }
+    if (!personId) {
+      out.findings.push(unresolved(
+        `membership_person_missing:${row.key}`,
+        row.key,
+        "无法从既有来源映射或规范姓名找到已导入选手，Membership 暂不写入。",
+        "membership_unresolved",
+      ));
+      continue;
+    }
     for (const hint of hints) {
       out.metrics.ruleDecisions++;
-      const organizationId = res.organizationMap[hint.organizationKey];
+      const organizationId = res.organizationMap[hint.organizationKey] ??
+        ctx.organizations.find((o) => normalizeOrganizationName(o.nameJa) === normalizeOrganizationName(
+          input.organizations.find((x) => x.key === hint.organizationKey)?.name ?? "",
+        ))?.id;
+      if (!organizationId) {
+        out.findings.push(unresolved(
+          `membership_organization_missing:${row.key}:${hint.organizationKey}`,
+          row.key,
+          "无法从既有来源映射或规范名称找到已导入组织，Membership 暂不写入。",
+          "membership_unresolved",
+        ));
+        continue;
+      }
       const existing = [...all.values()].filter(
         (m) =>
           m.personId === personId &&
