@@ -255,6 +255,7 @@ async function readResearchResponse(response: Response, secrets: string[], obser
 }
 export function createResearcher(config: ResearchConfig): Researcher {
   let count = 0, normalizationCount = 0;
+  // 研究器是受限适配器：规则层决定何时研究，这里只执行可审计的结构化请求。
   const once = async (request: ResearchRequest, metrics: Metrics, attemptNo: number, retryReason?: string): Promise<ResearchOutcome> => {
     if (JSON.stringify(request).length > (request.kind.startsWith("normalization_") || request.kind === "organization_adjudication" ? 512000 : 24000))
       return stop("research_scope_too_large", metrics);
@@ -394,7 +395,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
         diagnostic = errorDiagnostic(error, phase);
         return stop("research_unusable_response", metrics);
       }
-      // Batch answers are validated against per-item scopes by the graph before use.
+      // 批量答案还会由 graph 按 itemKey 再校验，防止跨对象引用或漏项。
       phase = "output_schema";
       if (request.kind === "normalization_cross_check") {
         try {

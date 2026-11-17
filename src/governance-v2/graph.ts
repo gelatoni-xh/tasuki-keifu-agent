@@ -34,6 +34,7 @@ const State = Annotation.Root({
   facts: Annotation<AgentResult>(),
   plan: Annotation<Plan>(),
 });
+// 图状态只描述一个 batch 的治理过程；任务租约、审计和业务事务由 runner/database/writer 负责。
 export type BatchGraphState = typeof State.State;
 export const graphNodeNames = [
   "load_batch_context",
@@ -68,6 +69,7 @@ export function buildBatchGraph(deps: {
   onNode?: (name: string) => Promise<void>;
   failAfter?: string;
 }) {
+  // 统一包装节点，保证进度记录和测试中断都发生在同一入口。
   const node =
     <T>(name: string, fn: (state: BatchGraphState) => Promise<T> | T) =>
     async (state: BatchGraphState) => {
@@ -110,6 +112,7 @@ export function buildBatchGraph(deps: {
     changes: [],
     metrics: emptyMetrics(),
   });
+  // 归一化先于履历和事实治理，后续判断使用的是已投影的实体映射。
   return new StateGraph(State)
     .addNode(
       "load_batch_context",

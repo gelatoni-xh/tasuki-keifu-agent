@@ -10,6 +10,7 @@ type Entry = { outcome: ResearchOutcome; metrics: Metrics };
 export function journalResearch(db: GovernanceDB, task: Task, attemptId: string,
   policy: unknown, research: Researcher): Researcher {
   return async (request, metrics) => {
+    // journal 覆盖“模型已返回但 graph checkpoint 尚未提交”的崩溃窗口。
     // Hash the JSON wire representation so Date values from PostgreSQL and
     // their checkpoint-restored ISO strings identify the same model request.
     const callId = fingerprint(JSON.parse(JSON.stringify({ request, policy })));
@@ -37,6 +38,7 @@ export function journalResearch(db: GovernanceDB, task: Task, attemptId: string,
       ));
     }
     if (!(metrics.accountedCallIds ??= []).includes(callId)) {
+      // 恢复路径可能多次读取同一结果，但本次 execution 指标只累计一次。
       metrics.accountedCallIds.push(callId);
       for (const key of ["llmCalls", "networkCalls", "inputTokens", "outputTokens", "estimatedCostUsd"] as const)
         metrics[key] += entry.metrics[key];

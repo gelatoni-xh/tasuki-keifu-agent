@@ -20,6 +20,7 @@ export class BusinessWriter {
     plan: Plan,
     beforeCommit?: (client: PoolClient) => Promise<void>,
   ) {
+    // graph 只提出 Plan；所有业务副作用集中在 writer，便于统一做版本和事务检查。
     if (plan.mode !== task.mode) throw new Error("Plan/task mode mismatch");
     if (task.mode === "apply" && !this.writeEnabled)
       throw new Error("GOVERNANCE_WRITE_ENABLED=true is required for apply");
@@ -35,7 +36,7 @@ export class BusinessWriter {
       if (["completed", "completed_with_unresolved"].includes(batch.status))
         return;
       if (task.mode === "apply") {
-        // Lock in a stable order, and validate once before any action modifies a target.
+        // 按稳定顺序加锁，并在任何操作前一次性校验版本，避免死锁和半套旧计划。
         const expected = Object.assign(
           {},
           ...plan.changes.map((x) => x.expectedVersions),
@@ -85,6 +86,7 @@ export class BusinessWriter {
           );
       }
       if (beforeCommit) await beforeCommit(c);
+      // dry_run 也会记录治理结果，但只有 apply 才执行上面的业务变更。
       const status = plan.findings.some((f) => f.status === "unresolved")
         ? "completed_with_unresolved"
         : "completed";

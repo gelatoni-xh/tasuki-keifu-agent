@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
 export const RULE_VERSION = "2026-11-13.2";
+// CONTRACT_VERSION 描述数据形状；RULE_VERSION 描述治理判断规则，二者变更含义不同。
 const text = z.string().trim().min(1);
 export const orgTypes = [
   "unknown",
@@ -89,6 +90,7 @@ export const batchInputSchema = z
   })
   .strict()
   .superRefine((batch, ctx) => {
+    // 在进入 worker 前拒绝结构性损坏，避免运行中静默丢行或错连组织。
     for (const [field, values] of [
       ["rows", batch.rows],
       ["organizations", batch.organizations],
@@ -139,6 +141,7 @@ export const manifestSchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
+    // 一个任务内的 sequence 和 batch key 必须唯一，保证顺序和幂等键稳定。
     if (new Set(v.batches.map((b) => b.sequence)).size !== v.batches.length)
       ctx.addIssue({ code: "custom", message: "Duplicate batch sequence" });
     if (

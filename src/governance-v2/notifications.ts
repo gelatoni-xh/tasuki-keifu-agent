@@ -111,6 +111,7 @@ export async function enqueueReport(
   key: string,
   payload: unknown,
 ) {
+  // dedupeKey 让 worker 重试或进程重启时不会重复排队同一封通知。
   const details = (await c.query(
     `SELECT e."officialName", b."unitType", b."unitKey"
        FROM governance."EventImportTask" t
@@ -269,6 +270,7 @@ export async function deliverNotifications(
   transport: MailTransport,
   limit = 20,
 ) {
+  // 投递状态持久化在数据库；发送失败会保留记录并按退避策略重试。
   let sent = 0;
   for (let i = 0; i < limit; i++) {
     const token = randomUUID();

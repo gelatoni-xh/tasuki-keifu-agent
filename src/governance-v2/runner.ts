@@ -39,6 +39,7 @@ export class EventRunner {
     readonly options: RunnerOptions,
   ) {}
   async run(taskId?: string) {
+    // 只有持有数据库租约的 worker 才能推进任务；失去租约后禁止提交结果。
     const task = await this.db.claim(taskId);
     if (!task) return null;
     let leaseError: unknown;
@@ -112,6 +113,7 @@ export class EventRunner {
     }
   }
   private async runBatch(task: Task, batch: Batch) {
+    // 按赛事 sequence 串行执行，保证后续 batch 看到前面已提交的业务现状。
     await this.db.fenced(task, (c) =>
       c.query(
         'UPDATE governance."GovernanceBatch" SET status=\'running\',"updatedAt"=clock_timestamp() WHERE id=$1',
@@ -172,6 +174,7 @@ export class EventRunner {
         recursionLimit: 100,
       };
       try {
+        // 有完整 checkpoint 时恢复已有状态；只有新 attempt 才提供初始输入。
         const snapshot = await graph.getState(config);
         let plan: Plan;
         if (snapshot.values?.plan && !snapshot.next.length)
@@ -186,6 +189,7 @@ export class EventRunner {
           plan = result.plan;
         }
         await this.db.savePlan(task, attempt.id, plan);
+        // 计划先落库，再进入 writer；失败时仍有可审阅和可重试的计划。
         await this.options.beforeApply?.();
         await new BusinessWriter(this.db, this.options.writeEnabled).apply(
           task,
@@ -230,7 +234,7 @@ export class EventRunner {
             ],
           );
         });
-        // A committed batch must only be finalized, not re-planned after a crash.
+        // 已提交 batch 只能补收尾，不能因进程崩溃再次规划或重复写业务。
         const done = (
           await this.db.pool.query(
             'SELECT status FROM governance."GovernanceBatch" WHERE id=$1',

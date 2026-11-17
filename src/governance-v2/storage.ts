@@ -14,6 +14,7 @@ export class DirectoryPayloadStore implements PayloadStore {
       throw new Error("Payload directory must be absolute and persistent");
   }
   async put(input: BatchInput) {
+    // 文件名由内容 hash 决定，便于幂等复用并在读取时验证原始输入未被替换。
     const hash = fingerprint(input),
       bytes = gzipSync(canonicalJson(input));
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -25,6 +26,7 @@ export class DirectoryPayloadStore implements PayloadStore {
     return { ref, hash, bytes: bytes.length };
   }
   async get(ref: string, hash: string) {
+    // 先校验引用格式和真实路径，再解析 schema 和 hash，拒绝损坏或越界 payload。
     if (!/^[a-f0-9]{64}\.json\.gz$/.test(ref) || ref !== `${hash}.json.gz`)
       throw new Error("Invalid payload reference");
     const root = await realpath(this.directory),

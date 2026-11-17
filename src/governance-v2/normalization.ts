@@ -7,6 +7,7 @@ import { buildCrossCheckInput } from "./cross-check-input.js";
 import { isDnsRow, normalizeName } from "./rules.js";
 
 export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/8";
+// 归一化分阶段执行：先用规则缩小范围，再让模型处理少量仍不确定的候选。
 const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
@@ -148,6 +149,7 @@ function saveItems(state: NormalizationState, requests: ResearchRequest[], items
 }
 export async function lightBatch(domain: "organization" | "person", state: NormalizationState,
   resolution: Resolution, ctx: Context, research: Researcher): Promise<NormalizationState> {
+  // light 阶段只处理当前批次候选，不直接授权 merge/split 等高风险操作。
   const next = clone(state), metrics = resolution.metrics, started = Date.now();
   const requests = Object.values(next.requests).filter(r => r.kind === `${domain}_identity`);
   if (requests.length) {
@@ -165,6 +167,7 @@ export async function lightBatch(domain: "organization" | "person", state: Norma
 }
 export async function crossCheck(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
+  // cross-check 只发现批次内部不一致，结果还要经过 validate 和后续裁决。
   const next = clone(state), started = Date.now();
   if (!input.rows.length && !input.organizations.length) {
     stage(resolution.metrics, "normalization_cross_check", 0, 0, started); return next;
@@ -226,6 +229,7 @@ export function validateCrossCheck(input: BatchInput, state: NormalizationState,
 }
 export async function adjudicate(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
+  // 组织裁决使用独立组织证据，不能用暂定的人物同一结论反向证明组织相同。
   const next = clone(state), started = Date.now();
   const orgKeys = [...new Set(state.issues.filter(i => i.suggestedAction === "review_organization").map(i => i.organizationKey))];
   const requests: ResearchRequest[] = orgKeys.map(key => {
@@ -317,6 +321,7 @@ export async function researchOrganizations(input: BatchInput, ctx: Context, sta
 }
 export async function reassess(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
+  // 组织归一化可能改变人物关联，因此只重评受影响人物，避免重复处理整批输入。
   const next = clone(state), started = Date.now();
   const requests = Object.values(state.requests).filter(r => r.kind === "person_identity" && state.affectedPersonKeys.includes(r.subjectRef) && !input.rows.some(row => row.key === r.subjectRef && state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")));
   if (requests.length) {

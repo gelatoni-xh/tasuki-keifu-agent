@@ -82,6 +82,7 @@ export class GovernanceDB {
     }
   }
   async fenced<T>(task: Task, fn: (c: PoolClient) => Promise<T>) {
+    // 所有会改变任务状态的操作都先锁定并验证 leaseToken，防止旧 worker 越权提交。
     return this.transaction(async (c) => {
       const result = await c.query(
         'SELECT id FROM governance."EventImportTask" WHERE id=$1 AND "leaseToken"=$2 AND "leaseUntil">clock_timestamp() AND status=\'running\' FOR UPDATE',
@@ -96,7 +97,7 @@ export class GovernanceDB {
       hash = fingerprint(manifest);
     const refs = await Promise.all(manifest.batches.map((b) => store.put(b)));
     return this.transaction(async (c) => {
-      // No full payload duplication: only a compact manifest and object references live in SQL.
+      // SQL 只保存精简 manifest 和对象引用；完整输入留在带 hash 校验的 payload 存储中。
       const compact = {
         version: manifest.version,
         eventEditionId: manifest.eventEditionId,
@@ -135,6 +136,7 @@ export class GovernanceDB {
     });
   }
   async claim(taskId?: string, leaseSeconds = 120): Promise<Task | null> {
+    // SKIP LOCKED 允许多个 worker 找任务，同时避免领取同一个任务。
     return this.transaction(async (c) => {
       const row = (
         await c.query(
@@ -152,6 +154,7 @@ export class GovernanceDB {
     });
   }
   async heartbeat(task: Task, seconds = 120) {
+    // heartbeat 只有在旧租约仍有效时才成功，避免过期 worker 继续执行。
     const r = await this.pool.query(
       'UPDATE governance."EventImportTask" SET "heartbeatAt"=clock_timestamp(),"leaseUntil"=clock_timestamp()+$3*interval \'1 second\' WHERE id=$1 AND "leaseToken"=$2 AND status=\'running\' AND "leaseUntil">clock_timestamp()',
       [task.id, task.leaseToken, seconds],
@@ -167,6 +170,7 @@ export class GovernanceDB {
     ).rows;
   }
   async attempt(task: Task, batch: Batch, fresh = false) {
+    // 普通重试复用 graph thread；stale plan 等需要重新规划时才创建新 attempt。
     return this.fenced(task, async (c) => {
       const old = (
         await c.query(
@@ -201,6 +205,7 @@ export class GovernanceDB {
     });
   }
   async savePlan(task: Task, attemptId: string, plan: Plan) {
+    // 计划、finding 和 change 必须在同一受租约保护的事务中落库。
     await this.fenced(task, async (c) => {
       const executionIds: Record<string, string> = {};
       for (const a of plan.agents) {
