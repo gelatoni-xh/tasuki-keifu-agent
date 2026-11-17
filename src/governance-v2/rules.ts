@@ -21,12 +21,6 @@ export const normalizeName = (s: string) =>
     .normalize("NFKC")
     .replace(/[\s・･]/gu, "")
     .toLocaleLowerCase("ja");
-export function normalizePersonDisplayNameJa(value: string) {
-  const normalized = value.replace(/　/g, " ").replace(/\s+/gu, " ").trim();
-  return /[\p{Script=Han}々]/u.test(normalized)
-    ? normalized.replace(/ /g, "")
-    : normalized;
-}
 export const normalizeOrganizationName = (s: string) =>
   normalizeName(s)
     .replace(/高等学校$/u, "高校")
@@ -185,4 +179,8 @@ export function shouldUpdatePB(
         incoming < existing.markMillis &&
         reliability >= existing.reliability))
   );
+}
+
+export function isDnsRow(row: { notes?: string; mark?: string }): boolean {
+  return /\bDNS\b/i.test(`${row.mark ?? ""} ${row.notes ?? ""}`);
 }

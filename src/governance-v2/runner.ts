@@ -82,7 +82,7 @@ export class EventRunner {
         );
         const batch = (
           await c.query(
-            'SELECT id FROM governance."GovernanceBatch" WHERE "eventTaskId"=$1 AND status=\'failed\' ORDER BY sequence LIMIT 1',
+            'SELECT id,"recordCount" FROM governance."GovernanceBatch" WHERE "eventTaskId"=$1 AND status=\'failed\' ORDER BY sequence LIMIT 1',
             [task.id],
           )
         ).rows[0];
@@ -92,7 +92,19 @@ export class EventRunner {
             { batchId: batch.id },
             "batch_alert",
             `batch:${batch.id}:failure`,
-            { taskId: task.id, reason: message },
+            {
+              taskId: task.id,
+              batchId: batch.id,
+              mode: task.mode,
+              reason: message,
+              summary: {
+                plannedRows: Number(batch.recordCount ?? 0),
+                importedRows: 0,
+                repairs: 0,
+                plannedRepairs: 0,
+                unresolved: 0,
+              },
+            },
           );
       });
       throw error;
@@ -112,15 +124,16 @@ export class EventRunner {
     let fresh = false;
     for (let n = 0; n < (this.options.maxAttempts ?? 3); n++) {
       const attempt = await this.db.attempt(task, batch, fresh);
-      const reserve = async (kind: import("./research.js").ResearchRequest["kind"]) =>
+      const reserve = async (kind: import("./research.js").ResearchRequest["kind"], retry = false) =>
         this.db.fenced(task, async (c) => {
           const normalization = kind.startsWith("normalization_") || kind === "organization_adjudication";
-          const field = normalization ? "normalizationReservations" : "researchReservations";
+          const field = retry ? (normalization ? "normalizationRetryReservations" : "researchRetryReservations")
+            : normalization ? "normalizationReservations" : "researchReservations";
           const used = (await c.query(
             `SELECT COALESCE(sum(COALESCE((metrics->>$2)::int,0)),0)::int AS n FROM governance."BatchAttempt" WHERE "batchId"=$1`,
             [batch.id, field],
           )).rows[0].n;
-          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3)) return false;
+          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3) * (retry ? 2 : 1)) return false;
           await c.query(
             `UPDATE governance."BatchAttempt" SET metrics=jsonb_set(COALESCE(metrics,'{}'::jsonb),ARRAY[$2::text],to_jsonb(COALESCE((metrics->>$2)::int,0)+1)) WHERE id=$1`,
             [attempt.id, field],
@@ -156,8 +169,7 @@ export class EventRunner {
           );
         },
       });
-
-            const config = {
+      const config = {
         configurable: { thread_id: attempt.graphThreadId },
         recursionLimit: 100,
       };
@@ -279,7 +291,7 @@ export class EventRunner {
     ).rows[0];
     const batches = (
       await queryable.query(
-        'SELECT status,summary FROM governance."GovernanceBatch" WHERE "eventTaskId"=$1',
+        'SELECT status,summary,"recordCount" FROM governance."GovernanceBatch" WHERE "eventTaskId"=$1',
         [task.id],
       )
     ).rows;
@@ -318,11 +330,20 @@ export class EventRunner {
       done.reduce((n, b) => n + Number(b.summary?.[key] ?? 0), 0);
     const executions = (
       await queryable.query(
-        `SELECT ae.metrics
+        `SELECT ae.metrics,ae."batchAttemptId"
          FROM governance."AgentExecution" ae
          JOIN governance."BatchAttempt" ba ON ba.id=ae."batchAttemptId"
          JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
          WHERE gb."eventTaskId"=$1`,
+        [task.id],
+      )
+    ).rows;
+    const failedAttempts = (
+      await queryable.query(
+        `SELECT ba.id,ba.metrics
+         FROM governance."BatchAttempt" ba
+         JOIN governance."GovernanceBatch" gb ON gb.id=ba."batchId"
+         WHERE gb."eventTaskId"=$1 AND ba.status='failed'`,
         [task.id],
       )
     ).rows;
@@ -342,14 +363,56 @@ export class EventRunner {
         acc.agentDurationMs += Number(metrics.durationMs ?? 0);
         return acc;
       },
-      { costKnown: true, llmCalls: 0, networkCalls: 0, ruleDecisions: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, llmModels: [] as string[], agentExecutions: 0, agentDurationMs: 0, modelUsage: new Map<string, { calls: number; inputTokens: number; outputTokens: number }>() },
+      { llmRetryCount: 0, llmRetryExhaustedCount: 0, costKnown: true, llmCalls: 0, networkCalls: 0, ruleDecisions: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, llmModels: [] as string[], agentExecutions: 0, agentDurationMs: 0, modelUsage: new Map<string, { calls: number; inputTokens: number; outputTokens: number }>() },
     );
+    const addMetrics = (metrics: Record<string, unknown>) => {
+      observability.llmCalls += Number(metrics.llmCalls ?? 0);
+      observability.networkCalls += Number(metrics.networkCalls ?? 0);
+      observability.ruleDecisions += Number(metrics.ruleDecisions ?? 0);
+      observability.inputTokens += Number(metrics.inputTokens ?? 0);
+      observability.outputTokens += Number(metrics.outputTokens ?? 0);
+      observability.estimatedCostUsd += Number(metrics.estimatedCostUsd ?? 0);
+      if (Number(metrics.llmCalls ?? 0) > 0 && metrics.costKnown !== true) observability.costKnown = false;
+      for (const model of Array.isArray(metrics.llmModels) ? metrics.llmModels : [])
+        if (typeof model === "string" && !observability.llmModels.includes(model)) observability.llmModels.push(model);
+    };
+    for (const row of failedAttempts) {
+      const metrics = (row.metrics ?? {}) as Record<string, unknown>;
+      const journal = metrics.modelJournal;
+      if (!journal || typeof journal !== "object") continue;
+      const accounted = new Set(executions
+        .filter((execution) => execution.batchAttemptId === row.id)
+        .flatMap((execution) => execution.metrics?.accountedCallIds ?? []));
+      for (const [callId, entry] of Object.entries(journal as Record<string, unknown>)) {
+        if (accounted.has(callId)) continue;
+        if (!entry || typeof entry !== "object") continue;
+        const entryMetrics = (entry as { metrics?: unknown }).metrics;
+        if (entryMetrics && typeof entryMetrics === "object") {
+          const metrics = entryMetrics as Record<string, unknown>;
+          addMetrics(metrics);
+          for (const call of Array.isArray(metrics.researchCalls) ? metrics.researchCalls : []) {
+            if (!call || typeof call !== "object") continue;
+            const item = call as Record<string, unknown>;
+            if (typeof item.model !== "string") continue;
+            if (Number(item.attemptNo ?? 1) > 1) observability.llmRetryCount++;
+            if (item.retryExhausted === true) observability.llmRetryExhaustedCount++;
+            const usage = observability.modelUsage.get(item.model) ?? { calls: 0, inputTokens: 0, outputTokens: 0 };
+            usage.calls++;
+            usage.inputTokens += Number(item.inputTokens ?? 0);
+            usage.outputTokens += Number(item.outputTokens ?? 0);
+            observability.modelUsage.set(item.model, usage);
+          }
+        }
+      }
+    }
     for (const row of executions) {
       const metrics = (row.metrics ?? {}) as Record<string, unknown>;
       for (const call of Array.isArray(metrics.researchCalls) ? metrics.researchCalls : []) {
         if (!call || typeof call !== "object") continue;
         const item = call as Record<string, unknown>;
         if (typeof item.model !== "string") continue;
+        if (Number(item.attemptNo ?? 1) > 1) observability.llmRetryCount++;
+        if (item.retryExhausted === true) observability.llmRetryExhaustedCount++;
         const usage = observability.modelUsage.get(item.model) ?? { calls: 0, inputTokens: 0, outputTokens: 0 };
         usage.calls++;
         usage.inputTokens += Number(item.inputTokens ?? 0);
@@ -371,9 +434,13 @@ export class EventRunner {
       unresolved: findings.length,
       completedBatches: done.length,
       totalBatches: batches.length,
+      failedBatches: batches.filter((b) => b.status === "failed").length,
+      failedRows: batches.filter((b) => b.status === "failed").reduce((n, b) => n + Number(b.recordCount ?? 0), 0),
       unresolvedDetails: findings,
       observability: {
         llmCalls: observability.llmCalls,
+        llmRetryCount: observability.llmRetryCount,
+        llmRetryExhaustedCount: observability.llmRetryExhaustedCount,
         networkCalls: observability.networkCalls,
         ruleDecisions: observability.ruleDecisions,
         inputTokens: observability.inputTokens,

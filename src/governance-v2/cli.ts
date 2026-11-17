@@ -2,6 +2,7 @@ import "dotenv/config";
 import path from "node:path";
 import { adaptRacePayload } from "./legacy-adapter.js";
 import { manifestSchema } from "./contracts.js";
+import { positiveInteger, nonNegative } from "./config.js";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -34,6 +35,18 @@ async function main() {
   const db = new GovernanceDB(pool, readPool);
   try {
     // CLI 只负责装配依赖和选择运行模式；治理判断集中在 graph/agents/normalization。
+    if (command === "health") {
+      const state = (
+        await pool.query(
+          `SELECT to_regclass('governance."EventImportTask"') IS NOT NULL AS governance_ready,
+                  to_regclass('governance_checkpoint.checkpoints') IS NOT NULL AS checkpoint_ready`,
+        )
+      ).rows[0];
+      if (!state?.governance_ready || !state?.checkpoint_ready)
+        throw new Error("governance schemas are not ready");
+      console.log("ready");
+      return;
+    }
     if (command === "setup-checkpoints") {
       // 建表是一次性的管理操作，运行 worker 的 runtime 角色不应拥有 DDL 权限。
       await saver.setup();
@@ -41,7 +54,7 @@ async function main() {
       return;
     }
     if (command === "cleanup-checkpoints") {
-      const days = positive(
+      const days = positiveInteger(
         process.env.GOVERNANCE_CHECKPOINT_RETENTION_DAYS,
         7,
       );
@@ -154,17 +167,29 @@ async function main() {
         throw new Error(
           "Apply CLI requires a separate GOVERNANCE_READ_DATABASE_URL",
         );
+      const researchTimeoutMs = positiveInteger(
+        process.env.GOVERNANCE_RESEARCH_TIMEOUT_MS,
+        25000,
+        600000,
+      );
+      const researchRequests = positiveInteger(
+        process.env.GOVERNANCE_RESEARCH_REQUESTS,
+        3,
+      );
+      if (command === "worker")
+        console.info(JSON.stringify({
+          event: "governance_worker_config",
+          researchTimeoutMs,
+          researchRequests,
+        }));
       const runner = new EventRunner(db, store, saver, {
         writeEnabled: process.env.GOVERNANCE_WRITE_ENABLED === "true",
         research: {
           apiKey: process.env.OPENAI_API_KEY,
           baseUrl: process.env.OPENAI_BASE_URL,
           model: process.env.GOVERNANCE_RESEARCH_MODEL,
-          timeoutMs: positive(
-            process.env.GOVERNANCE_RESEARCH_TIMEOUT_MS,
-            25000,
-          ),
-          maxRequests: positive(process.env.GOVERNANCE_RESEARCH_REQUESTS, 3),
+          timeoutMs: researchTimeoutMs,
+          maxRequests: researchRequests,
           inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
           outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
         },
@@ -196,21 +221,12 @@ async function main() {
       return;
     }
     throw new Error(
-      "Usage: tsx src/governance-v2/cli.ts setup-checkpoints | submit <manifest.json> | run [task-id] | work-once | status <id> | retry <id> | deliver",
+      "Usage: tsx src/governance-v2/cli.ts health | setup-checkpoints | submit <manifest.json> | run [task-id] | work-once | status <id> | retry <id> | deliver",
     );
   } finally {
     if (readPool !== pool) await readPool.end();
     await pool.end();
   }
-}
-function positive(value: string | undefined, fallback: number) {
-  const v = Number(value);
-  if (!Number.isInteger(v) || v <= 0 || v > 100000) return fallback;
-  return v;
-}
-function nonNegative(value: string | undefined) {
-  const v = Number(value);
-  return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : "governance_failed");

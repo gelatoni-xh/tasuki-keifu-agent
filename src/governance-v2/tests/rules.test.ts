@@ -198,36 +198,6 @@ test("college race grade must not be applied to the athlete's high school", asyn
   );
   assert.equal(result.metrics.llmCalls, 0);
 });
-test("delegation organizations do not create person memberships", async () => {
-  const input = batchInputSchema.parse({
-    unitType: "heat",
-    unitKey: "m5000-11",
-    sequence: 0,
-    sourceId: "s",
-    raceSlug: "race",
-    organizations: [
-      { key: "mie", name: "三重陸協", type: "prefecture_representative" },
-    ],
-    rows: [
-      {
-        key: "1237",
-        name: "橋本 真宙",
-        organizationKey: "mie",
-        memberships: [{ organizationKey: "mie", type: "affiliated" }],
-      },
-    ],
-  });
-  const result = await governMemberships(
-    "b",
-    input,
-    ctx,
-    { ...res, organizationMap: { mie: "mie" } },
-    async () => assert.fail("Delegation names must not research as memberships"),
-  );
-  assert.equal(result.changes.length, 0);
-  assert.equal(result.findings.length, 0);
-  assert.equal(result.metrics.ruleDecisions, 0);
-});
 test("ordinary empty or uncertain facts never invoke research or create a problem", () => {
   const input = batchInputSchema.parse({
     unitType: "leg",
@@ -358,12 +328,13 @@ test("batch mail uses natural language and does not claim dry run repairs", asyn
   const body = batchReportText({
     taskId: "t",
     mode: "dry_run",
-    summary: { importedRows: 0, repairs: 0, plannedRepairs: 2, unresolved: 1 },
+    summary: { plannedRows: 44, importedRows: 0, repairs: 0, plannedRepairs: 2, unresolved: 1 },
     unresolved: [
       { subjectRef: "選手", reason: "官方资料不足，保留独立来源档案" },
     ],
   });
   assert.match(body, /修复 0 项/);
+  assert.match(body, /输入 44 条/);
   assert.match(body, /计划修复 2 项/);
   assert.match(body, /官方资料不足/);
   assert.doesNotMatch(body, /"subjectRef"/);
@@ -403,4 +374,18 @@ test("governance mail accepts gelatoni-xh MAIL_CONFIG shapes", () => {
     "resend",
   );
   assert.throws(() => parseMailConfig('{"provider":"smtp"}'), /requires/);
+});
+
+test("membership provider failures block; incomplete corrections do not partially mutate dates", async () => {
+  const input = batchInputSchema.parse({ unitType: "group", unitKey: "1", sequence: 0, sourceId: "s", raceSlug: "race", organizations: [], rows: [{ key: "r", name: "選手" }] });
+  const fixture = structuredClone(ctx);
+  fixture.memberships = [membership({ id: "one", startDate: "2020-04-01", endDate: "2023-03-31", startBasis: "source", endBasis: "source" }),
+    membership({ id: "two", organizationId: "h2", startDate: "2021-04-01", endDate: "2024-03-31", startBasis: "source", endBasis: "source" })];
+  await assert.rejects(governMemberships("b", input, fixture, res, async () => ({ stopReason: "research_timeout", evidence: [] })), /Membership research model failure/);
+  const result = await governMemberships("b", input, fixture, res, async () => ({ answer: { verdict: "correct_membership", targetId: null, duplicateIds: [], reason: "不能部分应用", evidence: [], corrections: [
+    { membershipId: "one", startDate: null, endDate: "2021-03-31" },
+    { membershipId: "foreign", startDate: "2022-01-01", endDate: null },
+  ], split: null }, evidence: [] }));
+  assert.ok(result.findings.some(f => f.status === "unresolved"));
+  assert.equal(result.changes.filter(c => c.operation.kind === "membership").length, 0);
 });

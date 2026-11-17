@@ -46,8 +46,6 @@ export function adaptRacePayload(
           "student_union_select",
           "organizer",
           "unknown",
-          "company",
-          "club",
         ].includes(type ?? "unknown")
       )
         return;

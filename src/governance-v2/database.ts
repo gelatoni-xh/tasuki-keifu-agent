@@ -3,6 +3,7 @@ import { Pool, types, type PoolClient } from "pg";
 import { basis, fingerprint, normalizeName } from "./rules.js";
 import {
   manifestSchema,
+  RULE_VERSION,
   type Manifest,
   type Context,
   type BatchInput,
@@ -214,7 +215,7 @@ export class GovernanceDB {
             randomUUID(),
             attemptId,
             a.agentKey,
-            "2026-11-11.1",
+            RULE_VERSION,
             a.skipped ? "skipped" : "succeeded",
             { findings: a.findings.length, changes: a.changes.length },
             a.metrics,
@@ -358,7 +359,7 @@ export class GovernanceDB {
       }));
       // Bounded per candidate, with a truncation sentinel kept visible in context.
       const historicalResults = (await c.query(`SELECT h.* FROM public."Person" p
-        CROSS JOIN LATERAL (SELECT rr.id,rr."personId",rr."organizationId",rr."organizationNameSnapshot",o."nameJa" AS "organizationName",
+        CROSS JOIN LATERAL (SELECT rr.id,rr."personId",rr."organizationId",o."nameJa" AS "organizationName",
           rr."raceId",r.slug AS "raceSlug",r.name AS "raceName",r."startsAt" AS "raceDate",
           rr.mark,rr.notes,rr."isStarter",rr."sourceId"
           FROM public."RaceResult" rr JOIN public."Race" r ON r.id=rr."raceId"

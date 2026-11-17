@@ -7,11 +7,9 @@ export function withBusinessResearchContext(
   research: Researcher,
 ): Researcher {
   return async (request, metrics) => {
-    if (request.allowNetwork === false) return research(request, metrics);
-    if (
-      request.kind !== "person_identity" &&
-      request.kind !== "organization_identity"
-    )
+    // Organization verification needs compact identity context, not a full merge footprint.
+    if (request.kind === "organization_identity" || request.allowNetwork === false) return research(request, metrics);
+    if (request.kind !== "person_identity")
       return research(request, metrics);
     const person = request.kind === "person_identity",
       column = person ? "personId" : "organizationId";

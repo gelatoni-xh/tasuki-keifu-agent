@@ -11,10 +11,9 @@ import {
   type Plan,
   type Resolution,
   type Window,
-  isNonMembershipOrgType,
-  isUnconfirmedOrgType,
 } from "./contracts.js";
 import {
+  isDnsRow,
   academicWindow,
   adjacentSchoolWindow,
   fillUnknownDates,
@@ -23,7 +22,6 @@ import {
   membershipConflict,
   normalizeName,
   normalizeOrganizationName,
-  normalizePersonDisplayNameJa,
   shouldUpdatePB,
   stableId,
 } from "./rules.js";
@@ -103,6 +101,7 @@ export async function normalizeOrganizations(
   research: Researcher,
   light = false,
   overrides: Record<string, string> = {},
+  forceReview: ReadonlySet<string> = new Set(),
 ): Promise<Resolution> {
   // 组织归一化先建立稳定映射，后续人物和 Membership 判断都依赖这个映射。
   const started = Date.now(),
@@ -116,7 +115,6 @@ export async function normalizeOrganizations(
   const resolved = new Map<string, string>();
   for (const org of input.organizations) {
     out.metrics.ruleDecisions++;
-    if (isUnconfirmedOrgType(org.type)) continue;
     const name = normalizeName(org.name),
       identity = `${name}:${org.type}`;
     const mapped = ctx.sourceMappings.find(
@@ -134,11 +132,12 @@ export async function normalizeOrganizations(
         ) &&
         (org.type === "unknown" || o.type === "unknown" || o.type === org.type),
     );
-    let id =
+    let id: string | undefined =
       overrides[org.key] ?? mapped ??
       resolved.get(identity) ??
       (candidates.length === 1 ? candidates[0].id : undefined);
-    if (!id && candidates.length === 0) {
+    if (forceReview.has(org.key)) id = undefined;
+    if (!id && (candidates.length === 0 || forceReview.has(org.key))) {
       const recalled = ctx.organizations.filter(
         (o) =>
           (o.slug === org.slug ||
@@ -302,6 +301,7 @@ export async function normalizePeople(
       metrics: {
         ...orgs.metrics,
         stoppedReasons: [...orgs.metrics.stoppedReasons],
+        normalizationRuleMatches: [],
       },
     };
   const stableMatches = new Map<string, string>();
@@ -318,7 +318,7 @@ export async function normalizePeople(
         m.sourceKey === sourceKey,
     )?.personId;
     let candidates = ctx.people.filter((p) =>
-      [p.displayNameJa, ...(p.aliases ?? [])].some((n) =>
+      [p.displayNameJa, p.displayNameKana, ...(p.aliases ?? [])].filter((n): n is string => !!n).some((n) =>
         [row.name, row.kana, row.roman]
           .filter((v): v is string => !!v)
           .some((v) => normalizeName(n) === normalizeName(v)),
@@ -332,14 +332,9 @@ export async function normalizePeople(
       const mappedPerson = ctx.people.find((p) => p.id === mapped);
       if (mappedPerson) candidates.push(mappedPerson);
     }
-    const rawOrgId = row.organizationKey
+    const orgId = row.organizationKey
       ? orgs.organizationMap[row.organizationKey]
       : undefined;
-    const orgType = row.organizationKey
-      ? input.organizations.find((o) => o.key === row.organizationKey)?.type
-      : undefined;
-    // A delegation name such as 三重陸協 is evidence for this race only.
-    const orgId = isNonMembershipOrgType(orgType) ? undefined : rawOrgId;
     // Historical schools identify a person even when the current race is at university.
     const hintedOrganizations = new Set(
       [
@@ -347,9 +342,9 @@ export async function normalizePeople(
         ...row.memberships.map((m) => orgs.organizationMap[m.organizationKey]),
       ].filter((id): id is string => !!id),
     );
-    const contextual = candidates.filter((p) => {
+    const contradictoryCohort = (p: Context["people"][number]) => {
       const memberships = ctx.memberships.filter((m) => m.personId === p.id);
-      const contradictoryCohort = memberships.some((m) => {
+      return memberships.some((m) => {
         if (m.organizationId !== orgId || m.organizationType !== "university")
           return false;
         const hint = row.memberships.find(
@@ -377,16 +372,28 @@ export async function normalizePeople(
               m.endDate < ctx.raceDate))
         );
       });
-      return (
-        !contradictoryCohort &&
-        memberships.some((m) => hintedOrganizations.has(m.organizationId))
-      );
+    };
+    const contextual = candidates.filter(p => !contradictoryCohort(p) &&
+      ctx.memberships.some(m => m.personId === p.id && hintedOrganizations.has(m.organizationId)));
+    // A historical entry is identity evidence even for DNS. It never proves a
+    // start, grade or Membership. Only compare independently canonicalized IDs.
+    const exactNameKana = candidates.filter(p => row.kana && normalizeName(p.displayNameJa) === normalizeName(row.name) &&
+      [p.displayNameKana, ...(p.aliases ?? [])].some(v => !!v && normalizeName(v) === normalizeName(row.kana!)));
+    const historical = (exactNameKana.length === 1 ? exactNameKana : []).flatMap(p => {
+      if (contradictoryCohort(p) || !orgId || !ctx.organizations.some(o => o.id === orgId)) return [];
+      const records = (ctx.historicalResults ?? []).filter(h => h.personId === p.id &&
+        h.organizationId === orgId && h.raceId !== ctx.raceId && !!h.sourceId &&
+        !!h.raceDate && !!ctx.raceDate && h.raceDate <= ctx.raceDate);
+      return records.length ? [{ person: p, records }] : [];
     });
+    const historicalMatch = historical.length === 1 &&
+      contextual.every(p => p.id === historical[0].person.id) ? historical[0] : undefined;
     let confirmedDistinct = false;
     let id =
       mapped ??
       stableMatches.get(sourceKey) ??
-      (contextual.length === 1
+      historicalMatch?.person.id ??
+      (historical.length === 0 && contextual.length === 1
         ? contextual[0].id
         : row.birthDate &&
             candidates.filter((p) => p.birthDate === row.birthDate).length === 1
@@ -400,9 +407,16 @@ export async function normalizePeople(
     )
       id = undefined;
     if (forceReview.has(row.key)) id = undefined;
+    if (id && historicalMatch?.person.id === id && !mapped && !forceReview.has(row.key)) {
+      out.metrics.normalizationRuleMatches!.push({ subjectRef: row.key, targetId: id,
+        rule: "exact_name_kana_historical_organization",
+        evidenceRefs: [`source:${row.key}`, ...historicalMatch.records.map(h => `result:${h.id}`)],
+        weakerCandidateIds: candidates.filter(p => p.id !== id).map(p => p.id) });
+    }
+    const currentDns = isDnsRow(row);
     // Research requires an actual competing attribution, not a mere empty field/name variation.
     if (
-      !id &&
+      !id && !currentDns &&
       (candidates.length || forceReview.has(row.key)) &&
       (light || contextual.length > 1 ||
         !!mapped ||
@@ -468,7 +482,7 @@ export async function normalizePeople(
         const target = {
           id,
           slug: `person-${id}`,
-          displayNameJa: normalizePersonDisplayNameJa(split.name),
+          displayNameJa: split.name,
           birthDate: row.birthDate,
         };
         out.changes.push({
@@ -517,7 +531,7 @@ export async function normalizePeople(
             entity: {
               id,
               slug: row.slug ?? `person-${id}`,
-              displayNameJa: normalizePersonDisplayNameJa(row.name),
+              displayNameJa: row.name,
               birthDate: row.birthDate,
             },
           },
@@ -526,7 +540,7 @@ export async function normalizePeople(
         ),
       );
       if (
-        candidates.length &&
+        candidates.length && !currentDns &&
         !confirmedDistinct &&
         !out.findings.some((f) => f.subjectRef === row.key)
       )
@@ -578,6 +592,15 @@ export async function normalizePeople(
           "保存来源身份映射",
         ),
       );
+    const ruleMatch = out.metrics.normalizationRuleMatches!.find(m => m.subjectRef === row.key);
+    if (ruleMatch) {
+      const mapping = out.changes.find(c => c.operation.kind === "source_mapping" &&
+        c.operation.sourceKey === sourceKey && c.operation.targetId === id);
+      if (mapping) {
+        mapping.reason += "；规则：姓名及假名一致，唯一强候选的历史报名所属一致（DNS亦可作为身份依据）";
+        mapping.evidence = ruleMatch.evidenceRefs.map(sourceKey => ({ sourceKey }));
+      }
+    }
   }
   out.metrics.durationMs += Date.now() - started;
   return out;
@@ -628,18 +651,13 @@ export async function governMemberships(
       ];
     }),
   );
-  const affected = new Set(Object.values(res.personMap));
+  const affected = new Set(input.rows.filter(row => !isDnsRow(row) && !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")).map(row => res.personMap[row.key]));
   for (const row of input.rows) {
+    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     for (const hint of row.memberships) {
-      const organizationId = res.organizationMap[hint.organizationKey];
-      const organizationType = orgTypes.get(organizationId);
-      if (
-        !organizationId ||
-        isUnconfirmedOrgType(organizationType) ||
-        isNonMembershipOrgType(organizationType)
-      ) continue;
       out.metrics.ruleDecisions++;
+      const organizationId = res.organizationMap[hint.organizationKey];
       const existing = [...all.values()].filter(
         (m) =>
           m.personId === personId &&
@@ -757,6 +775,7 @@ export async function governMemberships(
     const r = await research(
       {
         kind: "membership_conflict",
+        allowNetwork: true,
         subjectRef: f.subjectRef,
         question: f.reason,
         context: {
@@ -769,18 +788,21 @@ export async function governMemberships(
       },
       out.metrics,
     );
+    if (!r.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large"].includes(r.stopReason ?? ""))
+      throw new Error(`Membership research model failure: ${r.stopReason ?? "missing_answer"}`);
     if (
       r.answer?.verdict === "correct_membership" &&
       r.answer.corrections.length
     ) {
-      let applied = false;
+      const proposed = new Map(all);
+      let applied = false, invalid = false;
       for (const correction of r.answer.corrections) {
         const m = all.get(correction.membershipId);
-        if (!m || !relevant.some((x) => x.id === m.id)) continue;
+        if (!m || !relevant.some((x) => x.id === m.id)) { invalid = true; break; }
         const start = correction.startDate ?? m.startDate,
           end = correction.endDate ?? m.endDate;
-        if (start && end && start > end) continue;
-        all.set(m.id, {
+        if (start && end && start > end) { invalid = true; break; }
+        proposed.set(m.id, {
           ...m,
           startDate: start,
           endDate: end,
@@ -791,11 +813,12 @@ export async function governMemberships(
         applied = true;
       }
       if (
-        applied &&
-        ![...all.values()].some((m, i, a) =>
+        applied && !invalid &&
+        ![...proposed.values()].some((m, i, a) =>
           a.slice(i + 1).some((other) => membershipConflict(m, other)),
         )
       ) {
+        for (const [id, value] of proposed) all.set(id, value);
         f.status = "resolved";
         f.reason = r.answer.reason;
         f.evidence = r.evidence;
@@ -868,6 +891,7 @@ export function verifyFacts(
     { markMillis: number; reliability: number; change: Change }
   >();
   for (const row of input.rows) {
+    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     if (row.hometown) {
       out.metrics.ruleDecisions++;
@@ -979,11 +1003,8 @@ export function buildPlan(
       {
         kind: "race_result",
         personId: res.personMap[row.key],
-        organizationId: row.organizationKey && !isUnconfirmedOrgType(
-          input.organizations.find((o) => o.key === row.organizationKey)?.type,
-        ) ? res.organizationMap[row.organizationKey] : undefined,
-        organizationNameSnapshot: row.organizationKey
-          ? input.organizations.find((o) => o.key === row.organizationKey)?.name
+        organizationId: row.organizationKey
+          ? res.organizationMap[row.organizationKey]
           : undefined,
         row: {
           key: row.key,
@@ -998,10 +1019,7 @@ export function buildPlan(
       "保存原始比赛成绩及年级快照",
     ),
   );
-  const teams = input.teams.filter((t) => {
-    const organization = input.organizations.find((o) => o.key === t.organizationKey);
-    return organization && !isUnconfirmedOrgType(organization.type);
-  }).map((t) =>
+  const teams = input.teams.map((t) =>
     change(
       batchId,
       `team:${t.organizationKey}:${t.leg}`,

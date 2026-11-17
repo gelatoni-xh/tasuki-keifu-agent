@@ -1,13 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import type { Change, Operation, Plan } from "./contracts.js";
+import { RULE_VERSION, type Change, type Operation, type Plan } from "./contracts.js";
 import { GovernanceDB, iso, StalePlanError, type Task } from "./database.js";
-import {
-  markMillis,
-  normalizeName,
-  normalizePersonDisplayNameJa,
-  stableId,
-} from "./rules.js";
+import { markMillis, normalizeName, stableId } from "./rules.js";
 
 const tables = {
   person: "Person",
@@ -146,16 +141,13 @@ export class BusinessWriter {
       case "create_person": {
         entityType = "Person";
         entityId = op.entity.id;
-        const displayNameJa = normalizePersonDisplayNameJa(
-          op.entity.displayNameJa,
-        );
         const existing = (
           await c.query('SELECT * FROM public."Person" WHERE id=$1', [entityId])
         ).rows[0];
         if (existing) {
           if (
             normalizeName(existing.displayNameJa) !==
-            normalizeName(displayNameJa)
+            normalizeName(op.entity.displayNameJa)
           )
             throw new StalePlanError(`person:${entityId}`);
           break;
@@ -170,8 +162,8 @@ export class BusinessWriter {
           [
             entityId,
             collision ? `${op.entity.slug}-${entityId}` : op.entity.slug,
-            displayNameJa,
-            normalizeName(displayNameJa),
+            op.entity.displayNameJa,
+            normalizeName(op.entity.displayNameJa),
             op.entity.birthDate ?? null,
           ],
         );
@@ -328,13 +320,12 @@ export class BusinessWriter {
           before = old[0];
         } else before = Array.isArray(old) ? null : old;
         await c.query(
-          `INSERT INTO public."RaceResult" (id,"personId","raceId","organizationId","organizationNameSnapshot",mark,"markMillis",rank,"teamRank","gradeAtRace",notes,"sourceId","isEntry","isStarter","updatedAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,$13,clock_timestamp()) ON CONFLICT(id) DO UPDATE SET "personId"=EXCLUDED."personId","organizationId"=EXCLUDED."organizationId","organizationNameSnapshot"=EXCLUDED."organizationNameSnapshot",mark=EXCLUDED.mark,"markMillis"=EXCLUDED."markMillis",rank=EXCLUDED.rank,"teamRank"=EXCLUDED."teamRank",\"gradeAtRace\"=EXCLUDED.\"gradeAtRace\",notes=EXCLUDED.notes,"sourceId"=EXCLUDED."sourceId","isStarter"=EXCLUDED."isStarter","updatedAt"=clock_timestamp()`,
+          `INSERT INTO public."RaceResult" (id,"personId","raceId","organizationId",mark,"markMillis",rank,"teamRank","gradeAtRace",notes,"sourceId","isEntry","isStarter","updatedAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,$12,clock_timestamp()) ON CONFLICT(id) DO UPDATE SET "personId"=EXCLUDED."personId","organizationId"=EXCLUDED."organizationId",mark=EXCLUDED.mark,"markMillis"=EXCLUDED."markMillis",rank=EXCLUDED.rank,"teamRank"=EXCLUDED."teamRank","gradeAtRace"=EXCLUDED."gradeAtRace",notes=EXCLUDED.notes,"sourceId"=EXCLUDED."sourceId","isStarter"=EXCLUDED."isStarter","updatedAt"=clock_timestamp()`,
           [
             entityId,
             op.personId,
             plan.raceId,
             op.organizationId ?? null,
-            op.organizationNameSnapshot ?? null,
             op.row.mark ?? null,
             op.row.mark ? markMillis(op.row.mark) : null,
             op.row.rank ?? null,
@@ -429,7 +420,7 @@ export class BusinessWriter {
         {
           idempotencyKey: change.idempotencyKey,
           evidence: change.evidence,
-          ruleVersion: "2026-11-11.1",
+          ruleVersion: RULE_VERSION,
         },
       ],
     );
@@ -568,14 +559,13 @@ async function split(
     ])
   ).rowCount;
   if (!from) throw new StalePlanError(`person:${op.fromPersonId}`);
-  const displayNameJa = normalizePersonDisplayNameJa(op.target.displayNameJa);
   await c.query(
     'INSERT INTO public."Person" (id,slug,"displayNameJa","displayNameJaSearch","birthDate","updatedAt") VALUES($1,$2,$3,$4,$5,clock_timestamp())',
     [
       op.target.id,
       op.target.slug,
-      displayNameJa,
-      normalizeName(displayNameJa),
+      op.target.displayNameJa,
+      normalizeName(op.target.displayNameJa),
       op.target.birthDate ?? null,
     ],
   );

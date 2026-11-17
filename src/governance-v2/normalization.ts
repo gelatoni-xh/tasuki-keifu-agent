@@ -1,18 +1,23 @@
 import type { BatchInput, Context, Metrics, Resolution } from "./contracts.js";
-import { emptyMetrics, isUnconfirmedOrgType } from "./contracts.js";
+import { emptyMetrics } from "./contracts.js";
 import { normalizeOrganizations, normalizePeople } from "./agents.js";
 import type { Researcher, ResearchOutcome, ResearchRequest } from "./research.js";
 import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
-import { normalizeName } from "./rules.js";
+import { buildCrossCheckInput } from "./cross-check-input.js";
+import { isDnsRow, normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/1";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/8";
 // 归一化分阶段执行：先用规则缩小范围，再让模型处理少量仍不确定的候选。
+const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
   organizationOverrides: Record<string, string>;
   issues: NonNullable<ResearchOutcome["crossAnswer"]>["issues"];
   affectedPersonKeys: string[];
+  crossCheckEvidenceRefs?: string[];
+  pendingOrganizationKeys?: string[];
+  confirmedOrganizationKeys?: string[];
 };
 export const initialNormalization = (): NormalizationState => ({
   requests: {}, decisions: {}, organizationOverrides: {}, issues: [], affectedPersonKeys: [],
@@ -26,10 +31,14 @@ export async function projectNormalization(batchId: string, input: BatchInput, c
   state: NormalizationState, metrics: Metrics, people: boolean): Promise<Resolution> {
   const replay: Researcher = async (r) => {
     state.requests[keyOf(r)] = r;
+    if (r.kind === "person_identity" && input.rows.some(row => row.key === r.subjectRef &&
+        state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")))
+      return { stopReason: "organization_dependency_unresolved", evidence: [] };
     return state.decisions[keyOf(r)] ?? { stopReason: "pending_normalization", evidence: [] };
   };
-  const orgs = await normalizeOrganizations(batchId, input, ctx, replay, true, state.organizationOverrides);
-  const forceReview = new Set(state.issues.filter(i => ["unresolved", "research"].includes(i.suggestedAction) || i.issueType === "circular_evidence").flatMap(i => i.personKeys));
+  const orgs = await normalizeOrganizations(batchId, input, ctx, replay, true, state.organizationOverrides,
+    new Set([...(state.pendingOrganizationKeys ?? []), ...Object.entries(state.decisions).filter(([key, d]) => key.startsWith("organization_identity:") && d.answer?.verdict === "distinct").map(([key]) => key.slice("organization_identity:".length))]));
+  const forceReview = new Set([...input.rows.filter(row => state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")).map(row => row.key), ...state.issues.filter(i => ["unresolved", "research"].includes(i.suggestedAction) || i.issueType === "circular_evidence").flatMap(i => i.personKeys)]);
   const result = people ? await normalizePeople(batchId, input, ctx, orgs, replay, true, forceReview) : orgs;
   metrics.durationMs += result.metrics.durationMs;
   for (const change of result.changes) {
@@ -38,6 +47,7 @@ export async function projectNormalization(batchId: string, input: BatchInput, c
     const decision = Object.values(state.decisions).find(d => d.answer?.verdict === "match" && d.answer.targetId === op.targetId);
     if (decision?.answer) { change.reason += `；${decision.answer.reason}`; change.evidence = decision.evidence; }
   }
+  if (people) metrics.normalizationRuleMatches = result.metrics.normalizationRuleMatches;
   result.metrics = metrics;
   result.metrics.normalizationPolicyVersion = NORMALIZATION_POLICY_VERSION;
   return result;
@@ -62,7 +72,7 @@ function stage(metrics: Metrics, name: string, inputCount: number, resolvedCount
   metrics.durationMs += Date.now() - started;
   (metrics.normalizationStages ??= []).push({ stage: name, inputCount, resolvedCount, remainingCount: Math.max(0, inputCount - resolvedCount), durationMs: Date.now() - started });
 }
-function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx: Context) {
+function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx: Context, metrics?: Metrics) {
   if (!outcome.batchAnswer) {
     if (["research_budget_exhausted", "research_not_configured"].includes(outcome.stopReason ?? "")) return [];
     throw new Error(`Normalization model failure: ${outcome.stopReason ?? "missing_batch_answer"}`);
@@ -72,24 +82,53 @@ function requireBatch(outcome: ResearchOutcome, requests: ResearchRequest[], ctx
   const seen = new Set<string>();
   for (const item of answer.items) {
     const scope = scopes.find(s => s.itemKey === item.itemKey);
+    if (item.verdict !== "match" && item.targetId !== null) {
+      if (metrics) {
+        metrics.normalizationWarnings ??= [];
+        metrics.normalizationWarnings.push({
+          itemKey: item.itemKey,
+          code: "ignored_target_for_non_match",
+          ignoredTargetId: item.targetId,
+        });
+      }
+      item.targetId = null;
+    }
     if (!scope || seen.has(item.itemKey) ||
       (item.verdict === "match" ? !item.targetId || !scope.allowedIds.includes(item.targetId) : item.targetId !== null) ||
       item.evidenceRefs.some(ref => !scope.evidence.some(e => e.key === ref)) ||
-      (item.verdict !== "unresolved" && !item.evidenceRefs.length))
+      (item.verdict === "distinct" && !item.evidenceRefs.length))
       throw new Error("Invalid normalization batch scope/evidence");
+    if (item.personAssessments && (item.personAssessments.length !== scope.allowedIds.length ||
+        new Set(item.personAssessments.map(a => a.candidateId)).size !== scope.allowedIds.length ||
+        item.personAssessments.some(a => !scope.allowedIds.includes(a.candidateId)) ||
+        (item.verdict === "distinct" && item.personAssessments.some(a => a.samePersonPlausibility !== "low"))))
+      throw new Error("Invalid normalization batch person assessment scope/verdict");
     if (item.verdict === "match") {
       const request = requests.find(r => keyOf(r) === item.itemKey)!;
       const context = request.context as { row?: { birthDate?: string }; candidates?: Array<{ id: string; birthDate?: string }> };
       const candidate = context.candidates?.find(c => c.id === item.targetId);
+      if (context.row?.birthDate && candidate?.birthDate && context.row.birthDate !== candidate.birthDate)
+        throw new Error("Normalization match contradicts explicit birth date");
       if (request.kind === "person_identity" &&
           !item.evidenceRefs.some(ref =>
             ctx.historicalResults?.some(h => ref === `result:${h.id}` && h.personId === item.targetId) ||
             ctx.memberships.some(m => ref === `membership:${m.id}` && m.personId === item.targetId) ||
             ctx.historicalReferences?.some(h => ref === `reference:${h.id}` && h.personId === item.targetId)) &&
-          !(context.row?.birthDate && candidate?.birthDate === context.row.birthDate))
-        throw new Error("Normalization person match has no independent identity evidence");
-      if (context.row?.birthDate && candidate?.birthDate && context.row.birthDate !== candidate.birthDate)
-        throw new Error("Normalization match contradicts explicit birth date");
+          !(context.row?.birthDate && candidate?.birthDate === context.row.birthDate)) {
+        const reason = "模型匹配未引用该候选人的独立身份依据，保留待复核；原结论不授权匹配。";
+        (metrics && (metrics.normalizationWarnings ??= []))?.push({
+          itemKey: item.itemKey, code: "person_match_missing_independent_evidence",
+          ignoredTargetId: item.targetId!, evidenceRefs: [...item.evidenceRefs], reason: item.reason,
+        });
+        item.verdict = "unresolved";
+        item.targetId = null;
+        item.reason = `${reason} 原因：${item.reason}`;
+      } else if (!item.evidenceRefs.length && request.kind !== "person_identity") {
+        (metrics && (metrics.normalizationWarnings ??= []))?.push({ itemKey: item.itemKey,
+          code: "organization_match_missing_evidence", ignoredTargetId: item.targetId! });
+        item.verdict = "unresolved"; item.targetId = null;
+        item.reason = `缺少组织独立证据，保留待复核；${item.reason}`;
+      }
     }
     seen.add(item.itemKey);
   }
@@ -102,7 +141,7 @@ function saveItems(state: NormalizationState, requests: ResearchRequest[], items
     state.decisions[item.itemKey] = { answer: {
       verdict: item.verdict, targetId: item.targetId, duplicateIds: [], reason: item.reason,
       evidence: [], corrections: [], split: null,
-    }, evidence: [
+    }, ...(item.personAssessments ? { personAssessments: item.personAssessments } : {}), evidence: [
       ...(r.providedEvidence ?? []),
       ...item.evidenceRefs.map(sourceKey => ({ sourceKey })),
     ] };
@@ -115,43 +154,43 @@ export async function lightBatch(domain: "organization" | "person", state: Norma
   const requests = Object.values(next.requests).filter(r => r.kind === `${domain}_identity`);
   if (requests.length) {
     const outcome = await research({ kind: "normalization_light", subjectRef: domain,
-      question: "整组全量 unresolved，一次逐项判断。仅基于证据匹配普通变体/身份；同名或同所属本身不足以确认同人；不同出生日期不可match；不合并拆分。",
+      question: "整组全量 unresolved，一次逐项判断。仅基于证据匹配普通变体/身份；同名或同所属本身不足以确认同人；person match必须引用属于targetId的result/reference/membership独立证据（显式生日一致除外），不能只引用本次source；DNS报名可作为身份依据但不代表出场；不同出生日期不可match；不合并拆分。" + (domain === "person" ? PERSON_TRIAGE_QUESTION : ""),
       context: { items: itemsFor(requests, ctx) }, allowedIds: [], allowNetwork: false,
     }, metrics);
-    const items = requireBatch(outcome, requests, ctx);
+    const items = requireBatch(outcome, requests, ctx, metrics);
     saveItems(next, requests, items);
+    if (domain === "person") metrics.personIdentityTriage = items.map(i => ({ subjectRef: requests.find(r => keyOf(r) === i.itemKey)!.subjectRef,
+      stage: "person_light_batch", verdict: i.verdict, assessments: i.personAssessments ?? [] }));
     stage(metrics, `${domain}_light_batch`, requests.length, items.filter(i => i.verdict !== "unresolved").length, started);
   } else stage(metrics, `${domain}_light_batch`, 0, 0, started);
   return next;
 }
 export async function crossCheck(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
-  // cross-check 只发现批次内部不一致，结果还要经过 validate 和 adjudicate。
+  // cross-check 只发现批次内部不一致，结果还要经过 validate 和后续裁决。
   const next = clone(state), started = Date.now();
   if (!input.rows.length && !input.organizations.length) {
     stage(resolution.metrics, "normalization_cross_check", 0, 0, started); return next;
   }
-  const confirmedOrganizations = input.organizations.filter((organization) => !isUnconfirmedOrgType(organization.type));
+  const context = buildCrossCheckInput(input, ctx, state, resolution);
+  next.crossCheckEvidenceRefs = context.catalog.evidence.map(e => e.key);
   const outcome = await research({ kind: "normalization_cross_check", subjectRef: input.raceSlug,
-    question: "检查暂定组织与人物结论的矛盾/循环证据。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。没有问题返回issues空数组。",
-    context: { organizations: confirmedOrganizations, rows: input.rows,
-      organizationMap: resolution.organizationMap, personMap: resolution.personMap,
-      decisions: state.decisions, items: itemsFor(Object.values(state.requests), ctx),
-      organizationEvidence: confirmedOrganizations.map(o => ({ key: `source:${o.key}`, input: o, candidates: ctx.organizations })),
-    }, allowedIds: [], allowNetwork: false,
+    question: "检查全组暂定组织与人物结论的矛盾/循环证据。rows/organizations保留全组来源事实；candidateIds及暂定ID引用共享catalog，items是已有判断摘要，不是独立证据。仅引用catalog.evidence中的key。历史仅为已加载子集，注意截断标记；DNS不是出场，普通赛与NCG不可混淆，学校名称不能自动推出年级或Membership。只提出问题，不作合并拆分。组织问题引用source:组织key，人物列出该组织的来源行key。personKeys只能填写rows[].key（例如1766），绝不能填写provisionalPersonId或candidateIds；每个问题只涉及一个organizationKey，该问题的人物行必须属于该组织，跨组织问题拆开。candidateIds是宽松召回集合，不是已确认映射；gov暂定ID和无候选的新来源档案是正常流程，不能仅凭候选宽泛、无catalog匹配或当前DNS保留独立档案就报身份冲突。没有实质矛盾返回issues空数组。",
+    context, allowedIds: [], allowNetwork: false,
   }, resolution.metrics);
   if (!outcome.crossAnswer) {
     if (!["research_budget_exhausted", "research_not_configured"].includes(outcome.stopReason ?? ""))
       throw new Error(`Cross-check model failure: ${outcome.stopReason ?? "missing_cross_answer"}`);
     next.issues = [];
   } else next.issues = crossAnswerSchema.parse(outcome.crossAnswer).issues;
-  stage(resolution.metrics, "normalization_cross_check", input.rows.length, 0, started);
+  const flagged = new Set(next.issues.filter(i => i.suggestedAction !== "keep").flatMap(i => i.personKeys));
+  stage(resolution.metrics, "normalization_cross_check", input.rows.length, input.rows.length - flagged.size, started);
   return next;
 }
 export function validateCrossCheck(input: BatchInput, state: NormalizationState, ctx?: Context): NormalizationState {
   const next = clone(state);
   const seen = new Set<string>();
-  const refs = new Set([
+  const refs = new Set(state.crossCheckEvidenceRefs ?? [
     ...input.organizations.map(o => `source:${o.key}`),
     ...Object.values(state.requests).map(r => `source:${r.subjectRef}`),
     ...(ctx?.historicalResults ?? []).map(h => `result:${h.id}`),
@@ -159,16 +198,27 @@ export function validateCrossCheck(input: BatchInput, state: NormalizationState,
     ...input.rows.map(r => `source:${r.key}`),
     ...(ctx?.memberships ?? []).map(m => `membership:${m.id}`),
   ]);
-  for (const issue of state.issues) {
+  for (const issue of next.issues) {
     if (seen.has(issue.issueKey) || !input.organizations.some(o => o.key === issue.organizationKey) ||
       issue.personKeys.some(k => !input.rows.some(r => r.key === k && r.organizationKey === issue.organizationKey)) ||
       !issue.evidenceRefs.length || issue.evidenceRefs.some(ref => !refs.has(ref)))
       throw new Error("Cross-check returned unsupported issue scope/evidence");
+    const personIds = new Set(issue.personKeys.flatMap(k =>
+      state.requests[`person_identity:${k}`]?.allowedIds ?? []));
+    const related = new Set([`source:${issue.organizationKey}`, ...issue.personKeys.map(k => `source:${k}`),
+      ...(ctx?.historicalResults ?? []).filter(h => personIds.has(h.personId)).map(h => `result:${h.id}`),
+      ...(ctx?.historicalReferences ?? []).filter(h => personIds.has(h.personId)).map(h => `reference:${h.id}`),
+      ...(ctx?.memberships ?? []).filter(m => personIds.has(m.personId)).map(m => `membership:${m.id}`)]);
+    issue.evidenceRefs = issue.evidenceRefs.filter(ref => related.has(ref));
+    if (!issue.evidenceRefs.length) {
+      issue.reason = `缺少与本问题相关的证据；${issue.reason}`;
+      issue.suggestedAction = "unresolved";
+    }
     seen.add(issue.issueKey);
     if (["unresolved", "research"].includes(issue.suggestedAction) || issue.issueType === "circular_evidence") {
       for (const personKey of issue.personKeys) {
         const key = `person_identity:${personKey}`;
-        if (next.requests[key]) next.decisions[key] = { answer: {
+        if (next.requests[key]) next.decisions[key] = { ...next.decisions[key], answer: {
           verdict: "unresolved", targetId: null, duplicateIds: [], reason: issue.reason,
           evidence: [], corrections: [], split: null,
         }, evidence: [] };
@@ -197,16 +247,25 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
       question: "一次组织补充裁决。仅根据组织名称及独立来源确认普通变体；不能使用选手同人判断作为组织相同的证据；不足则unresolved。",
       context: { items: itemsFor(requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] }) }, allowedIds: [], allowNetwork: false,
     }, resolution.metrics);
-    const items = requireBatch(outcome, requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] });
+    const items = requireBatch(outcome, requests, { ...ctx, memberships: [], historicalResults: [], historicalReferences: [] }, resolution.metrics);
     saveItems(next, requests, items);
+    for (const request of requests) next.requests[keyOf(request)] = request;
     for (const item of items) {
       const r = requests.find(r => keyOf(r) === item.itemKey)!;
       if (item.verdict === "match" && item.targetId && resolution.organizationMap[r.subjectRef] !== item.targetId)
         next.organizationOverrides[r.subjectRef] = item.targetId;
     }
   }
+  next.confirmedOrganizationKeys = [...new Set([...(next.confirmedOrganizationKeys ?? []), ...requests.filter(r =>
+    ["match", "distinct"].includes(next.decisions[keyOf(r)]?.answer?.verdict ?? "")).map(r => r.subjectRef)])];
+  next.pendingOrganizationKeys = [...new Set([
+    ...Object.values(next.requests).filter(r => r.kind === "organization_identity" &&
+      !["match", "distinct"].includes(next.decisions[keyOf(r)]?.answer?.verdict ?? "")).map(r => r.subjectRef),
+    ...next.issues.filter(i => (i.suggestedAction === "review_organization" || i.issueType.startsWith("organization")) && i.suggestedAction !== "keep" &&
+      !next.confirmedOrganizationKeys?.includes(i.organizationKey)).map(i => i.organizationKey),
+  ])];
   const changed = Object.keys(next.organizationOverrides).filter(k => resolution.organizationMap[k] !== next.organizationOverrides[k]);
-  next.affectedPersonKeys = input.rows.filter(r => r.organizationKey && changed.includes(r.organizationKey)).map(r => r.key);
+  next.affectedPersonKeys = input.rows.filter(r => r.organizationKey && (changed.includes(r.organizationKey) || next.pendingOrganizationKeys?.includes(r.organizationKey))).map(r => r.key);
   for (const personKey of next.affectedPersonKeys) {
     delete next.decisions[`person_identity:${personKey}`];
     delete next.requests[`person_identity:${personKey}`];
@@ -214,43 +273,111 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
   stage(resolution.metrics, "organization_adjudication", requests.length, changed.length, started);
   return next;
 }
+// One entity per request, before the single bounded person reassessment. No back edge.
+export async function researchOrganizations(input: BatchInput, ctx: Context, state: NormalizationState,
+  resolution: Resolution, research: Researcher): Promise<NormalizationState> {
+  const next = clone(state), started = Date.now();
+  let count = 0, resolved = 0;
+  for (const key of state.pendingOrganizationKeys ?? []) {
+    const org = input.organizations.find(o => o.key === key)!;
+    const saved = state.requests[`organization_identity:${key}`];
+    const candidates = ctx.organizations.filter(o => saved?.allowedIds.includes(o.id));
+    const request: ResearchRequest = {
+      kind: "organization_identity", subjectRef: key, allowNetwork: true,
+      question: "联网核验单个来源组织的真实身份及其与候选组织的关系。优先学校/组织官网、赛事官方名录。结合赛事日期，引用搜索工具返回的URL和支持结论的原文。不可用暂定选手同人结论证明组织相同。只能match已有候选ID、distinct或unresolved；不得合并、拆分、编造ID或推断Membership。无可靠证据则unresolved。",
+      context: { organization: org, candidates, event: { raceSlug: input.raceSlug, raceDate: ctx.raceDate },
+        conflicts: state.issues.filter(i => i.organizationKey === key).map(i => ({ issueType: i.issueType, reason: i.reason })) },
+      allowedIds: candidates.map(o => o.id),
+    };
+    const outcome = await research(request, resolution.metrics); count++;
+    (resolution.metrics.organizationResearch ??= []).push({ subjectRef: key, candidateCount: candidates.length,
+      eligibility: state.issues.some(i => i.organizationKey === key && i.suggestedAction !== "keep") ? "cross_check_conflict" : "unresolved_light",
+      result: outcome.answer?.verdict ?? outcome.stopReason ?? "missing_answer" });
+    if (!outcome.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large", "research_has_no_verified_source_reference"].includes(outcome.stopReason ?? ""))
+      throw new Error(`Organization research model failure: ${outcome.stopReason ?? "missing_answer"}`);
+    if (outcome.answer && !["match", "distinct", "unresolved"].includes(outcome.answer.verdict))
+      throw new Error("Organization research cannot authorize merge/split");
+    if (outcome.answer?.verdict === "match" && (!outcome.answer.targetId || !request.allowedIds.includes(outcome.answer.targetId)))
+      throw new Error("Organization research returned foreign target");
+    if (outcome.answer && outcome.answer.verdict !== "unresolved" && !outcome.evidence.some(e => e.url && e.quote))
+      throw new Error("Organization research missing URL/quote evidence");
+    next.requests[`organization_identity:${key}`] = saved ?? request;
+    next.decisions[`organization_identity:${key}`] = outcome;
+    if (outcome.answer && ["match", "distinct"].includes(outcome.answer.verdict)) {
+      resolved++;
+      next.pendingOrganizationKeys = next.pendingOrganizationKeys?.filter(k => k !== key);
+      (next.confirmedOrganizationKeys ??= []).push(key);
+      if (outcome.answer.verdict === "match") next.organizationOverrides[key] = outcome.answer.targetId!;
+      const affected = input.rows.filter(row => row.organizationKey === key).map(row => row.key);
+      next.affectedPersonKeys = [...new Set([...next.affectedPersonKeys, ...affected])];
+      for (const personKey of affected) {
+        delete next.decisions[`person_identity:${personKey}`];
+        delete next.requests[`person_identity:${personKey}`];
+      }
+    }
+  }
+  stage(resolution.metrics, "organization_network_research", count, resolved, started);
+  return next;
+}
 export async function reassess(input: BatchInput, ctx: Context, state: NormalizationState,
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
   // 组织归一化可能改变人物关联，因此只重评受影响人物，避免重复处理整批输入。
   const next = clone(state), started = Date.now();
-  const requests = Object.values(state.requests).filter(r => r.kind === "person_identity" && state.affectedPersonKeys.includes(r.subjectRef));
+  const requests = Object.values(state.requests).filter(r => r.kind === "person_identity" && state.affectedPersonKeys.includes(r.subjectRef) && !input.rows.some(row => row.key === r.subjectRef && state.pendingOrganizationKeys?.includes(row.organizationKey ?? "")));
   if (requests.length) {
     const outcome = await research({ kind: "normalization_light", subjectRef: "affected_person_reassessment",
-      question: "组织已由独立证据修正，只重评受影响选手一次；仍不能仅同名同所属确认同人。",
+      question: "组织已由独立证据修正，只重评受影响选手一次；仍不能仅同名同所属确认同人。" + PERSON_TRIAGE_QUESTION,
       context: { items: itemsFor(requests, ctx), organizationMap: resolution.organizationMap }, allowedIds: [], allowNetwork: false,
     }, resolution.metrics);
-    const items = requireBatch(outcome, requests, ctx);
+    const items = requireBatch(outcome, requests, ctx, resolution.metrics);
     saveItems(next, requests, items);
+    (resolution.metrics.personIdentityTriage ??= []).push(...items.map(i => ({ subjectRef: requests.find(r => keyOf(r) === i.itemKey)!.subjectRef,
+      stage: "affected_person_reassessment", verdict: i.verdict, assessments: i.personAssessments ?? [] })));
     stage(resolution.metrics, "affected_person_reassessment", requests.length, items.filter(i => i.verdict !== "unresolved").length, started);
   } else stage(resolution.metrics, "affected_person_reassessment", 0, 0, started);
   return next;
 }
 export async function deepResearch(state: NormalizationState, resolution: Resolution, research: Researcher): Promise<NormalizationState> {
-  const next = clone(state), started = Date.now(); let count = 0;
+  const next = clone(state), started = Date.now(); let count = 0, resolved = 0;
   for (const r of Object.values(state.requests)) {
-    const answer = state.decisions[keyOf(r)]?.answer;
+    if (r.kind !== "person_identity" || state.pendingOrganizationKeys?.length &&
+        (r.context as { affiliation?: { source?: { key?: string } } }).affiliation?.source?.key &&
+        state.pendingOrganizationKeys.includes((r.context as { affiliation: { source: { key: string } } }).affiliation.source.key)) continue;
+    const decision = state.decisions[keyOf(r)];
+    const answer = decision?.answer;
     // Network research stays restricted to actual competing identities, not empty profiles.
     if (answer && answer.verdict !== "unresolved") continue;
     const candidates = (r.context as { candidates?: unknown[] }).candidates ?? [];
     const context = r.context as { row?: { birthDate?: string }; candidates?: Array<{ birthDate?: string }> };
     const birthConflict = context.row?.birthDate && context.candidates?.some(c => c.birthDate && c.birthDate !== context.row!.birthDate);
-    if (candidates.length < 2 && !birthConflict) continue;
-    const outcome = await research({ ...r, allowNetwork: true }, resolution.metrics);
+    const plausible = decision?.personAssessments?.filter(a => a.samePersonPlausibility !== "low") ?? [];
+    const crossConflict = state.issues.some(i => i.personKeys.includes(r.subjectRef) &&
+      (["research", "unresolved"].includes(i.suggestedAction) || i.issueType === "circular_evidence"));
+    // New light decisions use explained identity plausibility, not candidate count.
+    // Historical decisions without assessments retain the former eligibility guard.
+    const eligible = !!birthConflict || crossConflict || (decision?.personAssessments
+      ? plausible.length > 0 : candidates.length >= 2);
+    (resolution.metrics.personResearchRouting ??= []).push({ subjectRef: r.subjectRef, eligible,
+      reason: birthConflict ? "birth_conflict" : crossConflict ? "cross_check_conflict" : decision?.personAssessments
+        ? plausible.length ? "plausible_identity" : "low_identity_plausibility" : "legacy_candidate_count",
+      candidateIds: plausible.map(a => a.candidateId) });
+    if (!eligible) continue;
+    const outcome = await research({ ...r,
+      question: r.question + " 核查轻量层指出的具体同人疑点（包括同音异字、可能OCR/误录）；lightAssessment只是待验证假设，不是独立证据。根据可靠来源确认同人、不同人或仍待确认，不得仅凭姓名相似或轻量等级下结论。",
+      context: { ...r.context as Record<string, unknown>,
+      lightAssessment: { reason: answer?.reason, assessments: decision?.personAssessments ?? [] } }, allowNetwork: true }, resolution.metrics);
     if (!outcome.answer && !["research_budget_exhausted", "research_not_configured", "research_scope_too_large", "identity_footprint_too_large"].includes(outcome.stopReason ?? ""))
       throw new Error(`Deep research model failure: ${outcome.stopReason ?? "missing_answer"}`);
-    next.decisions[keyOf(r)] = outcome; count++;
+    next.decisions[keyOf(r)] = { ...outcome, ...(decision?.personAssessments ? { personAssessments: decision.personAssessments } : {}) }; count++;
+    if (outcome.answer && outcome.answer.verdict !== "unresolved") resolved++;
   }
-  stage(resolution.metrics, "normalization_deep_research", count, 0, started);
+  stage(resolution.metrics, "normalization_deep_research", count, resolved, started);
   return next;
 }
 
 export function finalizeNormalization(input: BatchInput, state: NormalizationState, resolution: Resolution): Resolution {
   const result = clone(resolution);
+  result.metrics.normalizationDnsSkipped = input.rows.filter(row => isDnsRow(row)).map(row => row.key);
   result.metrics.normalizationSummary = {
     crossCheckIssues: state.issues.length,
     organizationCorrections: Object.keys(state.organizationOverrides).length,
@@ -260,7 +387,7 @@ export function finalizeNormalization(input: BatchInput, state: NormalizationSta
   };
   for (const issue of state.issues) {
     if (issue.suggestedAction === "keep") continue;
-    const corrected = !!state.organizationOverrides[issue.organizationKey];
+    const corrected = !!state.organizationOverrides[issue.organizationKey] || !!state.confirmedOrganizationKeys?.includes(issue.organizationKey);
     const peopleResolved = issue.personKeys.every(k => !result.findings.some(f => f.subjectRef === k && f.status === "unresolved"));
     result.findings.push({ key: `cross:${issue.issueKey}`, code: issue.issueType,
       subjectRef: issue.organizationKey, severity: "serious",

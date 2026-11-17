@@ -14,8 +14,8 @@ import {
 import { DirectoryPayloadStore } from "../storage.js";
 import { EventRunner } from "../runner.js";
 import type { Researcher } from "../research.js";
-import { CONTRACT_VERSION, manifestSchema } from "../contracts.js";
-import { deliverNotifications } from "../notifications.js";
+import { CONTRACT_VERSION, manifestSchema, type Metrics } from "../contracts.js";
+import { deliverNotifications, enqueueReport } from "../notifications.js";
 
 const url = process.env.GOVERNANCE_TEST_DATABASE_URL;
 if (!url)
@@ -185,14 +185,22 @@ test("two batches atomically import, improve existing high school, preserve bett
     null,
   );
   let mails = 0;
+  const subjects: string[] = [];
   await deliverNotifications(pool, async (m) => {
     mails++;
+    subjects.push(m.subject);
     assert.match(m.text, /导入 2 条/);
   });
   await deliverNotifications(pool, async () => {
     mails++;
   });
   assert.equal(mails, 1);
+  assert.match(subjects[0], /試験駅伝2024赛事治理总结/);
+  const batchId = (await pool.query('SELECT id FROM governance."GovernanceBatch" ORDER BY sequence LIMIT 1')).rows[0].id;
+  await enqueueReport(pool, { batchId }, "batch_alert", "subject-test", { taskId: id, reason: "test" });
+  let alertSubject = "";
+  assert.equal(await deliverNotifications(pool, async m => { alertSubject = m.subject; }), 1);
+  assert.match(alertSubject, /試験駅伝2024第1区治理告警/);
 });
 test("dry-run stores plans and summary but writes no business rows", async () => {
   const id = await db.submit(manifest("dry", "dry_run"), store);
@@ -338,6 +346,13 @@ test("payload tampering is detected before governance", async () => {
     ).rows[0].n,
     1,
   );
+  const alert = (
+    await pool.query(
+      `SELECT payload FROM governance."NotificationDelivery" WHERE kind='batch_alert'`,
+    )
+  ).rows[0].payload as { summary?: { plannedRows?: number }; batchId?: string };
+  assert.equal(alert.summary?.plannedRows, 1);
+  assert.equal(alert.batchId, (await db.batches(id))[0].id);
 });
 
 test("identity unresolved still imports all rows and emits a batch alert", async () => {
@@ -600,6 +615,9 @@ test("model journal survives a crash before lightweight checkpoint commit withou
   let lightweightCalls = 0;
   const research: Researcher = async (request, metrics) => {
     metrics.llmCalls++;
+    metrics.inputTokens += 100;
+    metrics.outputTokens += 20;
+    metrics.llmModels.push("fixture-model");
     if (request.kind === "normalization_light") { lightweightCalls++; }
     return stagedFixture(async () => ({ answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立证据不足", evidence: [], corrections: [], split: null }, evidence: [] }))(request, metrics);
   };
@@ -607,10 +625,53 @@ test("model journal survives a crash before lightweight checkpoint commit withou
   await assert.rejects(new EventRunner(db, store, saver, { writeEnabled: false,
     researcher: research, maxAttempts: 1, failAfterNode: "person_light_batch" }).run(id), /Injected/);
   assert.equal(lightweightCalls, 1);
+  const failureReport = (await pool.query(
+    `SELECT payload FROM governance."NotificationDelivery" WHERE kind='event_summary'`,
+  )).rows[0].payload;
+  assert.equal(failureReport.failedBatches, 1);
+  assert.equal(failureReport.failedRows, 1);
+  assert.equal(failureReport.observability.llmCalls, 1);
+  assert.equal(failureReport.observability.inputTokens, 100);
+  assert.equal(failureReport.observability.outputTokens, 20);
   await db.retry(id);
   const report = await new EventRunner(db, store, saver, { writeEnabled: false, researcher: research }).run(id);
   assert.equal(lightweightCalls, 1);
   assert.equal(report?.observability?.llmCalls, 3);
   assert.equal(report?.observability?.estimatedCostUsd, null);
   assert.equal(report?.importedRows, 0);
+});
+
+test("exhausted LLM retries stay journaled across task recovery and retain separate retry metrics", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response("temporary failure", { status: 503 }); };
+  try {
+    const input = manifest("retry-exhaustion", "dry_run"); input.batches = input.batches.slice(0, 1);
+    const id = await db.submit(input, store);
+    const options = { writeEnabled: false, maxAttempts: 1,
+      research: { apiKey: "test-only", model: "mock", timeoutMs: 1000, maxRequests: 1 } };
+    await assert.rejects(new EventRunner(db, store, saver, options).run(id), /research_http_503/);
+    assert.equal(calls, 3);
+    const failureReport = (await pool.query(`SELECT payload FROM governance."NotificationDelivery" WHERE kind='event_summary'`)).rows[0].payload;
+    assert.equal(failureReport.observability.llmCalls, 3);
+    assert.equal(failureReport.observability.llmRetryCount, 2);
+    assert.equal(failureReport.observability.llmRetryExhaustedCount, 1);
+    const journals = (await pool.query(`SELECT a.metrics->'modelJournal' AS journal
+      FROM governance."BatchAttempt" a JOIN governance."GovernanceBatch" b ON b.id=a."batchId" WHERE b."eventTaskId"=$1`, [id])).rows;
+    const persistedCalls = journals.flatMap(row => Object.values(row.journal ?? {})
+      .flatMap(entry => (entry as { metrics: Metrics }).metrics.researchCalls ?? []));
+    assert.equal(persistedCalls.length, 3);
+    assert.equal(new Set(persistedCalls.map(call => call.clientRequestId)).size, 3);
+    for (const call of persistedCalls) {
+      assert.equal(call.httpStatus, 503);
+      assert.equal(call.diagnostic?.upstream?.message, "temporary failure");
+      assert.equal(call.diagnostic?.bodyFormat, "text");
+      assert.equal(call.usageReported, false);
+      assert.ok((call.requestBytes ?? 0) > 0);
+      assert.match(call.requestFingerprint ?? "", /^[a-f0-9]{64}$/);
+    }
+    await db.retry(id);
+    await assert.rejects(new EventRunner(db, store, saver, options).run(id), /research_http_503/);
+    assert.equal(calls, 3, "Recovery must not reset the exhausted model retry allowance");
+  } finally { globalThis.fetch = original; }
 });

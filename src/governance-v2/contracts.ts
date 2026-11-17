@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
-export const RULE_VERSION = "2026-11-11.1";
+export const RULE_VERSION = "2026-11-13.2";
 // CONTRACT_VERSION 描述数据形状；RULE_VERSION 描述治理判断规则，二者变更含义不同。
 const text = z.string().trim().min(1);
 export const orgTypes = [
@@ -16,19 +16,6 @@ export const orgTypes = [
   "club",
   "organizer",
 ] as const;
-export const unconfirmedOrgTypes = new Set(["unknown", "company", "club"] as const);
-export const isUnconfirmedOrgType = (type: string | undefined) =>
-  !!type && unconfirmedOrgTypes.has(type as "unknown" | "company" | "club");
-// These names describe a race delegation or event role, not a durable person affiliation.
-export const nonMembershipOrgTypes = new Set([
-  "prefecture_representative",
-  "student_union_select",
-  "organizer",
-] as const);
-export type NonMembershipOrgType =
-  (typeof nonMembershipOrgTypes extends Set<infer T> ? T : never);
-export const isNonMembershipOrgType = (type: string | undefined) =>
-  !!type && nonMembershipOrgTypes.has(type as NonMembershipOrgType);
 export const dateBasis = z.enum(["unknown", "source", "inferred"]);
 export const orgSchema = z
   .object({
@@ -206,6 +193,7 @@ export type Person = {
   id: string;
   slug: string;
   displayNameJa: string;
+  displayNameKana?: string | null;
   birthDate?: string | null;
   hometown?: string | null;
   updatedAt?: string;
@@ -286,7 +274,6 @@ export type Operation =
       kind: "race_result";
       personId: string;
       organizationId?: string;
-      organizationNameSnapshot?: string;
       row: Pick<
         PersonRow,
         "key" | "mark" | "rank" | "teamRank" | "grade" | "notes"
@@ -335,15 +322,56 @@ export type Metrics = {
   accountedCallIds?: string[];
   normalizationStages?: Array<{ stage: string; inputCount: number; resolvedCount: number; remainingCount: number; durationMs: number }>;
   normalizationPolicyVersion?: string;
+  normalizationDnsSkipped?: string[];
+  personIdentityTriage?: Array<{ subjectRef: string; stage: string; verdict: string; assessments: Array<{
+    candidateId: string; nameRelation: string; samePersonPlausibility: string; reason: string;
+  }> }>;
+  personResearchRouting?: Array<{ subjectRef: string; eligible: boolean; reason: string; candidateIds: string[] }>;
+  organizationResearch?: Array<{ subjectRef: string; candidateCount: number; eligibility: "unresolved_light" | "cross_check_conflict"; result: string }>;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
+  normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string; evidenceRefs?: string[]; reason?: string }>;
+  normalizationRuleMatches?: Array<{ subjectRef: string; targetId: string; rule: string; evidenceRefs: string[]; weakerCandidateIds: string[] }>;
   researchCalls?: Array<{
     callId?: string; stage?: string; itemCount?: number;
+    attemptNo?: number; maxAttempts?: number; retryReason?: string; retryExhausted?: boolean;
     model: string;
     category: string;
     durationMs: number;
     inputTokens: number;
     outputTokens: number;
     stoppedReason: string | null;
+    providerRequestId?: string;
+    clientRequestId?: string;
+    startedAt?: string;
+    endpoint?: string;
+    requestBytes?: number;
+    requestFingerprint?: string;
+    networkEnabled?: boolean;
+    timeoutMs?: number;
+    httpStatus?: number;
+    headersReceivedMs?: number;
+    responseHeaders?: Record<string, string>;
+    usageReported?: boolean;
+    responseId?: string;
+    responseStatus?: string;
+    outputTypes?: string[];
+    outputTextLength?: number;
+    refusalCount?: number;
+    diagnostic?: {
+      phase: string;
+      code: string;
+      errorName?: string;
+      parserPosition?: number;
+      issueCount?: number;
+      issues?: Array<{ code: string; path: string[] }>;
+      upstream?: { code?: string; type?: string; param?: string; message?: string; incompleteReason?: string; requestId?: string };
+      eventType?: string;
+      sequenceNumber?: number;
+      bodyFormat?: string;
+      bodyBytesRead?: number;
+      bodyTruncated?: boolean;
+      bodyReadError?: string;
+    };
   }>;
 };
 export type AgentResult = {
