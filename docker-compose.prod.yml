@@ -7,8 +7,8 @@ services:
     environment:
       NODE_OPTIONS: --max-old-space-size=160
       GOVERNANCE_PAYLOAD_DIR: /var/lib/tasuki-governance/payloads
-      GOVERNANCE_WRITE_ENABLED: "false"
-      GOVERNANCE_MAIL_ENABLED: "false"
+      GOVERNANCE_WRITE_ENABLED: "${GOVERNANCE_WRITE_ENABLED:-false}"
+      GOVERNANCE_MAIL_ENABLED: "${GOVERNANCE_MAIL_ENABLED:-false}"
     volumes:
       - governance-payloads:/var/lib/tasuki-governance/payloads
     networks: [tasuki-keifu]
