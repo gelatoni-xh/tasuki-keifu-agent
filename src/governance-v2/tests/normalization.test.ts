@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
-import { normalizePeople } from "../agents.js";
+import { normalizePeople, governMemberships } from "../agents.js";
 import { buildBatchGraph } from "../graph.js";
 import { manifestSchema, CONTRACT_VERSION, emptyMetrics, type Context } from "../contracts.js";
 import type { Researcher, ResearchRequest } from "../research.js";
@@ -73,6 +73,38 @@ test("unknown, club, and company entries stay as race-name snapshots", async () 
   assert.equal(raceResult.operation.organizationNameSnapshot, "試験クラブ");
   assert.equal(result.plan.changes.some((change) => change.operation.kind === "create_organization"), false);
   assert.equal(result.plan.changes.some((change) => change.operation.kind === "membership"), false);
+});
+
+test("corporate-team identity merge ignores non-conflicting university history", async () => {
+  const data = input();
+  data.organizations = [{ key: "o", name: "花王", type: "corporate_team" }];
+  data.rows = [{ key: "ledama", name: "KISAISA LEDAMA", organizationKey: "o", memberships: [], pbs: [] }];
+  const ctx = context();
+  ctx.organizations = [
+    { id: "team", slug: "kao", nameJa: "花王", type: "corporate_team" },
+    { id: "university", slug: "school", nameJa: "試験大学", type: "university" },
+  ];
+  ctx.people = [
+    { id: "canonical", slug: "canonical", displayNameJa: "KISAISA LEDAMA" },
+    { id: "duplicate", slug: "duplicate", displayNameJa: "KISAISA LEDAMA" },
+  ];
+  ctx.memberships = [
+    { id: "m1", personId: "canonical", organizationId: "team", organizationType: "corporate_team", type: "affiliated", startBasis: "unknown", endBasis: "unknown", endState: "unknown" },
+    { id: "m2", personId: "duplicate", organizationId: "university", organizationType: "university", type: "enrolled", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+  ];
+  ctx.historicalResults = [
+    { id: "h1", personId: "canonical", organizationId: "team", raceId: "old1", raceSlug: "old1", raceName: "旧赛", raceDate: "2025-01-01" },
+    { id: "h2", personId: "canonical", organizationId: "team", raceId: "old2", raceSlug: "old2", raceName: "旧赛", raceDate: "2025-02-01" },
+    { id: "h3", personId: "duplicate", organizationId: "university", raceId: "old3", raceSlug: "old3", raceName: "旧赛", raceDate: "2024-01-01" },
+  ];
+  const result = await normalizePeople(
+    "b", data, ctx,
+    { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+    async () => { throw new Error("non-conflicting identities must not call research"); },
+  );
+  assert.equal(result.personMap.ledama, "canonical");
+  assert.ok(result.changes.some(c => c.operation.kind === "merge_person" && c.operation.duplicateId === "duplicate"));
+  assert.equal(result.metrics.normalizationRuleMatches?.[0]?.rule, "non_conflicting_corporate_team_identity_merge");
 });
 
 function items(r: ResearchRequest) { return (r.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items; }
@@ -461,4 +493,59 @@ test("cross-check removes unrelated known evidence and keeps unsupported referen
   assert.deepEqual(state.issues[0].evidenceRefs, ["source:unrelated"]);
   state.issues[0].evidenceRefs = ["invented"];
   assert.throws(() => validateCrossCheck(data, state, context()), /unsupported/);
+});
+
+
+test("a university graduate entering a corporate team resolves without research", async () => {
+  const data = input(), ctx = context();
+  data.organizations[0].type = "corporate_team";
+  data.rows = [data.rows[0]];
+  ctx.people = [ctx.people[0]];
+  ctx.memberships = [{ id: "school-history", personId: "pa", organizationId: "university",
+    organizationType: "university", type: "enrolled", startBasis: "unknown",
+    endBasis: "unknown", endState: "unknown" }];
+  const result = await normalizePeople("b", data, ctx,
+    { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+    async () => { throw new Error("no research expected"); });
+  assert.equal(result.personMap.a, "pa");
+  assert.equal(result.changes.some(c => c.operation.kind === "create_person"), false);
+});
+
+test("different corporate teams and contradictory birthdays prevent automatic duplicate merging", async () => {
+  for (const scenario of ["team", "birthday", "homophone", "school"]) {
+    const data = input(), ctx = context();
+    data.organizations[0].type = "corporate_team";
+    data.rows = [data.rows[0]];
+    data.rows[0].kana = "センシュ";
+    ctx.people = [
+      { id: "pa", slug: "a", displayNameJa: data.rows[0].name, displayNameKana: "センシュ", birthDate: "1998-01-01" },
+      { id: "pb", slug: "b", displayNameJa: scenario === "homophone" ? "別漢字" : data.rows[0].name,
+        displayNameKana: "センシュ", birthDate: scenario === "birthday" ? "1999-01-01" : "1998-01-01" },
+    ];
+    ctx.memberships = [
+      { id: "m1", personId: "pa", organizationId: scenario === "school" ? "u1" : "team", organizationType: scenario === "school" ? "university" : "corporate_team", type: scenario === "school" ? "enrolled" : "affiliated", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+      { id: "m2", personId: "pb", organizationId: scenario === "team" ? "other-team" : "u2", organizationType: scenario === "team" ? "corporate_team" : "university", type: scenario === "team" ? "affiliated" : "enrolled", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+    ];
+    const result = await normalizePeople("b", data, ctx,
+      { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+      async () => ({ evidence: [] }), true);
+    assert.equal(result.changes.some(c => c.operation.kind === "merge_person"), false, scenario);
+  }
+});
+
+test("identical membership duplicates produce executable deletion; dated separate spells stay for review", async () => {
+  for (const separate of [false, true]) {
+    const data = input(), ctx = context();
+    data.rows = [data.rows[0]];
+    ctx.memberships = ["m1", "m2"].map(id => ({
+      id, personId: "pa", organizationId: "o1", organizationType: "high_school", type: "enrolled",
+      startDate: separate && id === "m2" ? "2021-04-01" : undefined,
+      startBasis: "unknown", endBasis: "unknown", endState: "unknown",
+    }));
+    const result = await governMemberships("b", data, ctx,
+      { organizationMap: { o: "o1" }, personMap: { a: "pa" }, findings: [], changes: [], metrics: emptyMetrics() },
+      async () => { throw new Error("duplicate cleanup needs no LLM"); });
+    assert.equal(result.changes.filter(c => c.operation.kind === "delete_membership").length, separate ? 0 : 1);
+    assert.equal(result.findings.some(f => f.code === "membership_unresolved"), separate);
+  }
 });

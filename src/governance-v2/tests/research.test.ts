@@ -136,11 +136,8 @@ test("research validates citations and structured output and stops at request bu
     assert.equal(metrics.outputTokens, 30);
     assert.deepEqual(metrics.llmModels, ["configured-model"]);
     assert.equal(metrics.estimatedCostUsd, 0.00016);
-    assert.equal(
-      (await research(request, metrics)).stopReason,
-      "research_budget_exhausted",
-    );
-    assert.equal(calls, 1);
+    assert.equal((await research(request, metrics)).answer?.targetId, "p");
+    assert.equal(calls, 2);
   } finally {
     globalThis.fetch = original;
   }
@@ -200,7 +197,7 @@ test("research records provider request and response identifiers without raw out
     assert.equal(JSON.stringify(metrics).includes("学校所属"), false);
   } finally { globalThis.fetch = original; }
 });
-test("missing configuration, oversized questions and exhausted persisted budget make no model call", async () => {
+test("missing configuration and oversized questions make no model call", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () => {
     assert.fail("Must not call provider");
@@ -230,15 +227,12 @@ test("missing configuration, oversized questions and exhausted persisted budget 
       ).stopReason,
       "research_scope_too_large",
     );
-    assert.equal(
-      (
-        await createResearcher({ ...configured, reserve: async () => false })(
-          request,
-          emptyMetrics(),
-        )
-      ).stopReason,
-      "research_budget_exhausted",
-    );
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
+        ...answer, verdict: "unresolved", evidence: [],
+      }) }] }],
+    }));
+    assert.equal((await createResearcher({ ...configured, reserve: async () => false })(request, emptyMetrics())).answer?.verdict, "unresolved");
   } finally {
     globalThis.fetch = original;
   }
@@ -306,7 +300,7 @@ test("provider-compatible schema still enforces local URL, date and reason valid
   } finally { globalThis.fetch = original; }
 });
 
-test("whole-group schemas disable tools and have a fixed five-call allowance separate from deep research", async () => {
+test("whole-group schemas disable tools without a batch logical request allowance", async () => {
   const original = globalThis.fetch; let calls = 0;
   globalThis.fetch = async (_url, init) => {
     calls++; const body = JSON.parse(String(init?.body));
@@ -325,10 +319,10 @@ test("whole-group schemas disable tools and have a fixed five-call allowance sep
       const out = await research({ ...request, kind, allowNetwork: false, context: { items: [], padding: "x".repeat(25000) } }, metrics);
       assert.ok(out.batchAnswer || out.crossAnswer);
     }
-    assert.equal((await research({ ...request, kind: "normalization_light", allowNetwork: false }, metrics)).stopReason, "research_budget_exhausted");
+    assert.ok((await research({ ...request, kind: "normalization_light", allowNetwork: false }, metrics)).batchAnswer);
     assert.ok((await research(request, metrics)).answer);
-    assert.equal((await research(request, metrics)).stopReason, "research_budget_exhausted");
-    assert.equal(calls, 6);
+    assert.ok((await research(request, metrics)).answer);
+    assert.equal(calls, 8);
     assert.equal(metrics.costKnown, false);
   } finally { globalThis.fetch = original; }
 });
@@ -382,7 +376,7 @@ test("light batch retries fabricated and foreign-item evidence, then accepts the
     assert.equal(calls, 3);
     assert.equal(metrics.inputTokens, 300);
     assert.equal(metrics.outputTokens, 60);
-    assert.deepEqual(reservations, [false, true, true]);
+    assert.deepEqual(reservations, []);
     assert.deepEqual(metrics.researchCalls?.map(c => c.attemptNo), [1, 2, 3]);
     assert.equal(metrics.researchCalls?.[1].diagnostic?.issues?.[0].path.join("."), "items.0.evidenceRefs");
   } finally { globalThis.fetch = original; }

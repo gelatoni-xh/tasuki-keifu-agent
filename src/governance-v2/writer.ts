@@ -219,6 +219,30 @@ export class BusinessWriter {
         );
         break;
       }
+      case "delete_membership": {
+        entityType = "Membership";
+        entityId = op.membershipId;
+        before = (await c.query(
+          'SELECT * FROM public."Membership" WHERE id=$1 FOR UPDATE', [op.membershipId],
+        )).rows[0];
+        const retained = (await c.query(
+          'SELECT * FROM public."Membership" WHERE id=$1 FOR UPDATE', [op.retainedId],
+        )).rows[0];
+        const fields = ["personId", "organizationId", "type", "startDate", "endDate",
+          "startDateBasis", "endDateBasis", "endState", "exclusivityGroup"];
+        const duplicate = before as Record<string, unknown> | undefined;
+        if (!duplicate || !retained || duplicate.personId !== op.personId ||
+            duplicate.organizationId !== op.organizationId ||
+            fields.some(k => JSON.stringify(duplicate[k]) !== JSON.stringify(retained[k])))
+          throw new StalePlanError(`membership:${op.membershipId}`);
+        // Preserve both source footprints on the surviving record and in the audit.
+        await c.query(
+          `UPDATE public."Membership" SET "dateEvidence"=COALESCE("dateEvidence",'{}'::jsonb)||jsonb_build_object('deduplicatedMembership',$2::jsonb),"updatedAt"=clock_timestamp() WHERE id=$1`,
+          [op.retainedId, JSON.stringify(duplicate)],
+        );
+        await c.query('DELETE FROM public."Membership" WHERE id=$1', [op.membershipId]);
+        break;
+      }
       case "membership": {
         const m = op.membership;
         entityType = "Membership";
@@ -409,7 +433,9 @@ export class BusinessWriter {
         audit,
         entityType,
         entityId,
-        op.kind.startsWith("merge_")
+        op.kind === "delete_membership"
+          ? "delete"
+          : op.kind.startsWith("merge_")
           ? "merge"
           : op.kind === "split_person"
             ? "split"
@@ -608,6 +634,9 @@ function businessDiff(
 ): { before: unknown; after: unknown } {
   let after: Record<string, unknown>;
   switch (op.kind) {
+    case "delete_membership":
+      after = { deleted: true, retainedId: op.retainedId };
+      break;
     case "membership":
       after = {
         startDate: op.membership.startDate ?? null,

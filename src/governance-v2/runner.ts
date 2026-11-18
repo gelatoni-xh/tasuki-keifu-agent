@@ -134,22 +134,6 @@ export class EventRunner {
         graphThreadId: attempt.graphThreadId, mode: task.mode,
         agentMode: task.inputManifest.agentMode ?? "full",
       }, input);
-      const reserve = async (kind: import("./research.js").ResearchRequest["kind"], retry = false) =>
-        this.db.fenced(task, async (c) => {
-          const normalization = kind.startsWith("normalization_") || kind === "organization_adjudication";
-          const field = retry ? (normalization ? "normalizationRetryReservations" : "researchRetryReservations")
-            : normalization ? "normalizationReservations" : "researchReservations";
-          const used = (await c.query(
-            `SELECT COALESCE(sum(COALESCE((metrics->>$2)::int,0)),0)::int AS n FROM governance."BatchAttempt" WHERE "batchId"=$1`,
-            [batch.id, field],
-          )).rows[0].n;
-          if (used >= (normalization ? 5 : this.options.research?.maxRequests ?? 3) * (retry ? 2 : 1)) return false;
-          await c.query(
-            `UPDATE governance."BatchAttempt" SET metrics=jsonb_set(COALESCE(metrics,'{}'::jsonb),ARRAY[$2::text],to_jsonb(COALESCE((metrics->>$2)::int,0)+1)) WHERE id=$1`,
-            [attempt.id, field],
-          );
-          return true;
-        });
       const instrumentResearch = (researcher: Researcher) => trace ? trace.research(researcher) : researcher;
       const research = journalResearch(this.db, task, attempt.id, {
         policy: NORMALIZATION_POLICY_VERSION, model: this.options.research?.model,
@@ -160,10 +144,8 @@ export class EventRunner {
           createResearcher({
             ...this.options.research,
             timeoutMs: this.options.research?.timeoutMs ?? 25000,
-            maxRequests: this.options.research?.maxRequests ?? 3,
             inputCostPerMillionUsd: this.options.inputCostPerMillionUsd,
             outputCostPerMillionUsd: this.options.outputCostPerMillionUsd,
-            reserve,
           }),
       )));
       const graph = buildBatchGraph({

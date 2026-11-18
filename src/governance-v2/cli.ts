@@ -178,15 +178,12 @@ async function main() {
         25000,
         600000,
       );
-      const researchRequests = positiveInteger(
-        process.env.GOVERNANCE_RESEARCH_REQUESTS,
-        3,
-      );
       if (command === "worker")
         console.info(JSON.stringify({
           event: "governance_worker_config",
           researchTimeoutMs,
-          researchRequests,
+          logicalRequestBudget: "unlimited",
+          maxResearchAttempts: 3,
         }));
       const runner = new EventRunner(db, store, saver, {
         tracer,
@@ -196,7 +193,6 @@ async function main() {
           baseUrl: process.env.OPENAI_BASE_URL,
           model: process.env.GOVERNANCE_RESEARCH_MODEL,
           timeoutMs: researchTimeoutMs,
-          maxRequests: researchRequests,
           inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
           outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
         },
