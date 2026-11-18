@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
-export const RULE_VERSION = "2026-11-18.1";
+export const RULE_VERSION = "2026-11-19.1";
 // CONTRACT_VERSION 描述数据形状；RULE_VERSION 描述治理判断规则，二者变更含义不同。
 const text = z.string().trim().min(1);
 export const orgTypes = [
@@ -33,6 +33,8 @@ export const membershipHintSchema = z
     exclusivityGroup: z.enum(["employment", "team_registration"]).optional(),
     grade: z.number().int().min(1).max(10).optional(),
     startDate: z.iso.date().optional(),
+    startYear: z.number().int().min(1800).max(2200).optional(),
+    endYear: z.number().int().min(1800).max(2200).optional(),
     endDate: z.iso.date().optional(),
     endState: z.enum(["unknown", "ongoing", "ended"]).default("unknown"),
   })
@@ -175,6 +177,8 @@ export type Finding = {
   evidence: Evidence[];
 };
 export type Window = {
+  startYear?: number;
+  endYear?: number;
   startDate?: string;
   endDate?: string;
   startBasis: Basis;
@@ -201,6 +205,10 @@ export type Person = {
   aliases?: string[];
 };
 export type Membership = Window & {
+  role?: string;
+  faculty?: string;
+  department?: string;
+  cohort?: string;
   id: string;
   personId: string;
   organizationId: string;
@@ -333,6 +341,8 @@ export type Metrics = {
   organizationResearch?: Array<{ subjectRef: string; candidateCount: number; eligibility: "unresolved_light" | "cross_check_conflict"; result: string }>;
   normalizationSummary?: { crossCheckIssues: number; organizationCorrections: number; affectedPeople: number; reassessedPeople: number; affectedPeopleResolved: number };
   normalizationWarnings?: Array<{ itemKey: string; code: string; ignoredTargetId: string; evidenceRefs?: string[]; reason?: string }>;
+  membershipResearchPeople?: number;
+  membershipConflictFindings?: number;
   membershipRowsConsidered?: number;
   membershipImplicitHints?: number;
   membershipDnsRowsIncluded?: number;

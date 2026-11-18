@@ -6,7 +6,7 @@ import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
 import { isDnsRow, normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/8";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/9";
 // 归一化分阶段执行：先用规则缩小范围，再让模型处理少量仍不确定的候选。
 const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
 export type NormalizationState = {
@@ -237,7 +237,7 @@ export async function adjudicate(input: BatchInput, ctx: Context, state: Normali
     // Independent organization-only evidence. No tentative person assignments are supplied.
     const candidates = ctx.organizations.filter(o =>
       (org.type === "unknown" || o.type === "unknown" || o.type === org.type) &&
-      normalizeName(o.nameJa).slice(0, 2) === normalizeName(org.name).slice(0, 2));
+      [o.nameJa, ...(o.aliases ?? [])].some(n => normalizeName(n).slice(0, 2) === normalizeName(org.name).slice(0, 2)));
     return { kind: "organization_identity", subjectRef: key, question: "组织独立证据裁决",
       context: { input: org, candidates }, allowedIds: candidates.map(o => o.id),
       providedEvidence: [{ sourceId: input.sourceId, sourceKey: org.sourceKey ?? key }] };
@@ -284,7 +284,7 @@ export async function researchOrganizations(input: BatchInput, ctx: Context, sta
     const candidates = ctx.organizations.filter(o => saved?.allowedIds.includes(o.id));
     const request: ResearchRequest = {
       kind: "organization_identity", subjectRef: key, allowNetwork: true,
-      question: "联网核验单个来源组织的真实身份及其与候选组织的关系。优先学校/组织官网、赛事官方名录。结合赛事日期，引用搜索工具返回的URL和支持结论的原文。不可用暂定选手同人结论证明组织相同。只能match已有候选ID、distinct或unresolved；不得合并、拆分、编造ID或推断Membership。无可靠证据则unresolved。",
+      question: "联网核验单个来源组织的真实身份及其与候选组织的关系。优先学校/组织官网、赛事官方名录。充分使用已有aliases；旧称、更名、新体制须查官方沿革、继承关系；仅同集团、名称近似或共同选手不足以确认同队。即使发现存量重复档案也只判断本次映射，交独立维护，不在主图合并。结合赛事日期，引用搜索工具返回的URL和支持结论的原文。不可用暂定选手同人结论证明组织相同。只能match已有候选ID、distinct或unresolved；不得合并、拆分、编造ID或推断Membership。无可靠证据则unresolved。",
       context: { organization: org, candidates, event: { raceSlug: input.raceSlug, raceDate: ctx.raceDate },
         conflicts: state.issues.filter(i => i.organizationKey === key).map(i => ({ issueType: i.issueType, reason: i.reason })) },
       allowedIds: candidates.map(o => o.id),

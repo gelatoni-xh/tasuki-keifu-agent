@@ -2,7 +2,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { journalResearch } from "./research-journal.js";
 import { NORMALIZATION_POLICY_VERSION } from "./normalization.js";
 import { withBusinessResearchContext } from "./research-context.js";
-import { buildBatchGraph, type BatchGraphState } from "./graph.js";
+import { buildBatchGraph, buildMembershipGraph, type BatchGraphState } from "./graph.js";
 import {
   GovernanceDB,
   LeaseLostError,
@@ -19,7 +19,7 @@ import { emptyMetrics, type Plan, type Resolution } from "./contracts.js";
 import type { PayloadStore } from "./storage.js";
 import { BusinessWriter } from "./writer.js";
 import { buildMembershipOnlyPlan, buildPlan } from "./agents.js";
-import { normalizeName } from "./rules.js";
+import { normalizeName, normalizeOrganizationName } from "./rules.js";
 import { enqueueReport, needsAttention, type Report } from "./notifications.js";
 import type { GovernanceTracer } from "./tracing.js";
 
@@ -148,12 +148,12 @@ export class EventRunner {
             outputCostPerMillionUsd: this.options.outputCostPerMillionUsd,
           }),
       )));
-      const graph = buildBatchGraph({
+      const graphDeps = {
         loadContext: () => this.db.loadContext(task, input),
         research,
         checkpointer: this.saver,
         failAfter: this.options.failAfterNode,
-        onNode: async (name) => {
+        onNode: async (name: string) => {
           await this.db.fenced(task, (c) =>
             c.query(
               "UPDATE governance.\"BatchAttempt\" SET metrics=COALESCE(metrics,'{}'::jsonb)||jsonb_build_object('currentNode',$2::text) WHERE id=$1",
@@ -161,7 +161,9 @@ export class EventRunner {
             ),
           );
         },
-      });
+      };
+      const graph = task.inputManifest.agentMode === "membership_only"
+        ? buildMembershipGraph(graphDeps) : buildBatchGraph(graphDeps);
       const config = {
         configurable: { thread_id: attempt.graphThreadId },
         metadata: { taskId: task.id, batchId: batch.id, attemptId: attempt.id },
@@ -184,7 +186,8 @@ export class EventRunner {
           const organizationMap = Object.fromEntries(input.organizations.map(o => {
             const sourceKey = o.sourceKey ?? `org:${normalizeName(o.name)}`;
             const mapped = context.sourceMappings.find(m => m.entityType === "organization" && m.sourceKey === sourceKey)?.organizationId;
-            const fallback = context.organizations.filter(c => normalizeName(c.nameJa) === normalizeName(o.name));
+            const fallback = context.organizations.filter(c => [c.nameJa, ...(c.aliases ?? [])].some(name =>
+              normalizeOrganizationName(name) === normalizeOrganizationName(o.name)));
             return [o.key, mapped ?? (fallback.length === 1 ? fallback[0].id : undefined)];
           }).filter(([, id]) => !!id) as Array<[string, string]>);
           const currentRaceMap = await this.db.currentRacePersonMap(input);
@@ -204,7 +207,10 @@ export class EventRunner {
             })),
           };
           const resolution: Resolution = { organizationMap, personMap, findings: [], changes: [], metrics: emptyMetrics() };
-          plan = await buildMembershipOnlyPlan(batch.id, membershipInput, context, resolution, task.mode, research);
+          const result = await graph.invoke(snapshot.values?.membershipWork ? null : {
+            batchId: batch.id, input: membershipInput, context, resolution, mode: task.mode,
+          }, config);
+          plan = await buildMembershipOnlyPlan(batch.id, result.input, result.context, result.resolution, task.mode, research, result.membership);
         } else {
           const result = await graph.invoke(
             snapshot.values?.batchId ? null : { batchId: batch.id, input, mode: task.mode },

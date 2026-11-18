@@ -228,7 +228,7 @@ export class BusinessWriter {
         const retained = (await c.query(
           'SELECT * FROM public."Membership" WHERE id=$1 FOR UPDATE', [op.retainedId],
         )).rows[0];
-        const fields = ["personId", "organizationId", "type", "startDate", "endDate",
+        const fields = ["personId", "organizationId", "type", "role", "faculty", "department", "cohort", "startDate", "endDate", "startYear", "endYear",
           "startDateBasis", "endDateBasis", "endState", "exclusivityGroup"];
         const duplicate = before as Record<string, unknown> | undefined;
         if (!duplicate || !retained || duplicate.personId !== op.personId ||
@@ -237,7 +237,7 @@ export class BusinessWriter {
           throw new StalePlanError(`membership:${op.membershipId}`);
         // Preserve both source footprints on the surviving record and in the audit.
         await c.query(
-          `UPDATE public."Membership" SET "dateEvidence"=COALESCE("dateEvidence",'{}'::jsonb)||jsonb_build_object('deduplicatedMembership',$2::jsonb),"updatedAt"=clock_timestamp() WHERE id=$1`,
+          `UPDATE public."Membership" SET "dateEvidence"=COALESCE("dateEvidence",'{}'::jsonb)||jsonb_build_object('deduplicatedMemberships',COALESCE("dateEvidence"->'deduplicatedMemberships','[]'::jsonb)||jsonb_build_array($2::jsonb)),"updatedAt"=clock_timestamp() WHERE id=$1`,
           [op.retainedId, JSON.stringify(duplicate)],
         );
         await c.query('DELETE FROM public."Membership" WHERE id=$1', [op.membershipId]);
@@ -255,7 +255,7 @@ export class BusinessWriter {
             )
           ).rows[0] ?? null;
         await c.query(
-          `INSERT INTO public."Membership" (id,"personId","organizationId",type,"startDate","endDate","startYear","endYear","startDateBasis","endDateBasis","endState","dateEvidence","sourceId","exclusivityGroup","updatedAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,clock_timestamp()) ON CONFLICT(id) DO UPDATE SET "startDate"=EXCLUDED."startDate","endDate"=EXCLUDED."endDate","startYear"=EXCLUDED."startYear","endYear"=EXCLUDED."endYear","startDateBasis"=EXCLUDED."startDateBasis","endDateBasis"=EXCLUDED."endDateBasis","endState"=EXCLUDED."endState","dateEvidence"=EXCLUDED."dateEvidence","exclusivityGroup"=EXCLUDED."exclusivityGroup","updatedAt"=clock_timestamp()`,
+          `INSERT INTO public."Membership" (id,"personId","organizationId",type,"startDate","endDate","startYear","endYear","startDateBasis","endDateBasis","endState","dateEvidence","sourceId","exclusivityGroup","updatedAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,clock_timestamp()) ON CONFLICT(id) DO UPDATE SET "startDate"=EXCLUDED."startDate","endDate"=EXCLUDED."endDate","startYear"=EXCLUDED."startYear","endYear"=EXCLUDED."endYear","startDateBasis"=EXCLUDED."startDateBasis","endDateBasis"=EXCLUDED."endDateBasis","endState"=EXCLUDED."endState","dateEvidence"=COALESCE("Membership"."dateEvidence",'{}'::jsonb)||EXCLUDED."dateEvidence","exclusivityGroup"=EXCLUDED."exclusivityGroup","updatedAt"=clock_timestamp()`,
           [
             m.id,
             m.personId,
@@ -263,8 +263,8 @@ export class BusinessWriter {
             m.type,
             m.startDate ?? null,
             m.endDate ?? null,
-            m.startDate ? Number(m.startDate.slice(0, 4)) : null,
-            m.endDate ? Number(m.endDate.slice(0, 4)) : null,
+            m.startYear ?? (m.startDate ? Number(m.startDate.slice(0, 4)) : null),
+            m.endYear ?? (m.endDate ? Number(m.endDate.slice(0, 4)) : null),
             m.startBasis,
             m.endBasis,
             m.endState,
@@ -639,6 +639,8 @@ function businessDiff(
       break;
     case "membership":
       after = {
+        startYear: op.membership.startYear ?? (op.membership.startDate ? Number(op.membership.startDate.slice(0, 4)) : null),
+        endYear: op.membership.endYear ?? (op.membership.endDate ? Number(op.membership.endDate.slice(0, 4)) : null),
         startDate: op.membership.startDate ?? null,
         endDate: op.membership.endDate ?? null,
         startDateBasis: op.membership.startBasis,

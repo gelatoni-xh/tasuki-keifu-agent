@@ -16,7 +16,9 @@ import {
 } from "./contracts.js";
 import {
   buildPlan,
-  governMemberships,
+  prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts,
+  researchMembershipConflicts, validateMembershipDecisions, finalizeMemberships,
+  type MembershipWork,
   verifyFacts,
 } from "./agents.js";
 import { isMembershipOrganizationType } from "./rules.js";
@@ -32,6 +34,7 @@ const State = Annotation.Root({
   resolution: Annotation<Resolution>(),
   normalization: Annotation<NormalizationState>(),
   membership: Annotation<AgentResult>(),
+  membershipWork: Annotation<MembershipWork>(),
   facts: Annotation<AgentResult>(),
   plan: Annotation<Plan>(),
 });
@@ -43,6 +46,8 @@ export const graphNodeNames = [
   "prepare_cross_check", "normalization_cross_check", "validate_cross_check", "organization_adjudication",
   "organization_network_research", "affected_person_reassessment", "normalization_deep_research", "finalize_normalization",
   "govern_membership",
+  "prepare_membership_context", "membership_rules", "collect_membership_conflicts",
+  "membership_deep_research", "validate_membership_decisions", "finalize_membership",
   "verify_person_facts",
   "aggregate_governance_result",
 ] as const;
@@ -66,6 +71,47 @@ export function route_person_facts_agent(
     ? "verify_person_facts"
     : "aggregate_governance_result";
 }
+export function buildMembershipGraph(deps: {
+  research: Researcher;
+  checkpointer?: BaseCheckpointSaver;
+  onNode?: (name: string) => Promise<void>;
+  failAfter?: string;
+}) {
+  const node = <T>(name: string, fn: (s: BatchGraphState) => T | Promise<T>) => async (s: BatchGraphState) => {
+    await deps.onNode?.(name);
+    const result = await fn(s);
+    if (deps.failAfter === name) throw new Error(`Injected interruption at ${name}`);
+    return result;
+  };
+  return new StateGraph(State)
+    .addNode("prepare_membership_context", node("prepare_membership_context", s => ({
+      membershipWork: prepareMembershipContext(s.input, s.context, s.resolution),
+    })))
+    .addNode("membership_rules", node("membership_rules", s => ({
+      membershipWork: resolveMembershipRules(s.batchId, s.input, s.context, s.resolution, s.membershipWork),
+    })))
+    .addNode("collect_membership_conflicts", node("collect_membership_conflicts", s => ({
+      membershipWork: collectMembershipConflicts(s.membershipWork),
+    })))
+    .addNode("membership_deep_research", node("membership_deep_research", async s => ({
+      membershipWork: await researchMembershipConflicts(s.input, s.context, s.resolution, s.membershipWork, deps.research),
+    })))
+    .addNode("validate_membership_decisions", node("validate_membership_decisions", s => ({
+      membershipWork: validateMembershipDecisions(s.membershipWork),
+    })))
+    .addNode("finalize_membership", node("finalize_membership", s => ({
+      membership: finalizeMemberships(s.batchId, s.context, s.membershipWork),
+    })))
+    .addEdge(START, "prepare_membership_context")
+    .addEdge("prepare_membership_context", "membership_rules")
+    .addEdge("membership_rules", "collect_membership_conflicts")
+    .addConditionalEdges("collect_membership_conflicts", s => s.membershipWork.groups.length
+      ? "membership_deep_research" : "finalize_membership", ["membership_deep_research", "finalize_membership"])
+    .addEdge("membership_deep_research", "validate_membership_decisions")
+    .addEdge("validate_membership_decisions", "finalize_membership")
+    .addEdge("finalize_membership", END)
+    .compile({ name: "membership_governance_graph", checkpointer: deps.checkpointer });
+}
 export function buildBatchGraph(deps: {
   loadContext: () => Promise<Context>;
   research: Researcher;
@@ -83,22 +129,7 @@ export function buildBatchGraph(deps: {
         throw new Error(`Injected interruption at ${name}`);
       return value;
     };
-  const membershipGraph = new StateGraph(State)
-    .addNode(
-      "resolve_membership_rules_and_conflicts",
-      node("resolve_membership_rules_and_conflicts", async (s) => ({
-        membership: await governMemberships(
-          s.batchId,
-          s.input,
-          s.context,
-          s.resolution,
-          deps.research,
-        ),
-      })),
-    )
-    .addEdge(START, "resolve_membership_rules_and_conflicts")
-    .addEdge("resolve_membership_rules_and_conflicts", END)
-    .compile({ name: "membership_governance_graph" });
+  const membershipGraph = buildMembershipGraph({ ...deps, checkpointer: undefined });
   const factsGraph = new StateGraph(State)
     .addNode(
       "compare_person_facts",
