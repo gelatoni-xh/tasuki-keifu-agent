@@ -1,3 +1,5 @@
+// 修改模型裁决项、证据校验或 Web Search 开放条件时，主动提醒用户评估观测页三语说明。
+// 仅在待发布行为确定后同步公开图例，避免把阶段性实验写成已上线流程。
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import type { Evidence, Metrics } from "./contracts.js";
