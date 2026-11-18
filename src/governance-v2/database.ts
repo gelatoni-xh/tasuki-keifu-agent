@@ -230,6 +230,10 @@ export class GovernanceDB {
     // 计划、finding 和 change 必须在同一受租约保护的事务中落库。
     await this.fenced(task, async (c) => {
       const executionIds: Record<string, string> = {};
+      await c.query(
+        'UPDATE governance."GovernanceChange" SET status=\'superseded\' WHERE "batchId"=$1 AND status=\'planned\' AND NOT ("idempotencyKey"=ANY($2::text[]))',
+        [plan.batchId, plan.changes.map((change) => change.idempotencyKey)],
+      );
       for (const a of plan.agents) {
         const r = await c.query(
           'INSERT INTO governance."AgentExecution" (id,"batchAttemptId","agentKey","agentVersion",status,"resultSummary",metrics,"endedAt") VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp()) ON CONFLICT("batchAttemptId","agentKey","executionNo") DO UPDATE SET status=EXCLUDED.status,"resultSummary"=EXCLUDED."resultSummary",metrics=EXCLUDED.metrics,"endedAt"=EXCLUDED."endedAt" RETURNING id',
