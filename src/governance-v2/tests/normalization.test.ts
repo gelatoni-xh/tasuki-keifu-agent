@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
-import { normalizePeople, governMemberships } from "../agents.js";
+import { normalizePeople, governMemberships, buildPlan } from "../agents.js";
 import { buildBatchGraph } from "../graph.js";
 import { manifestSchema, CONTRACT_VERSION, emptyMetrics, type Context } from "../contracts.js";
 import type { Researcher, ResearchRequest } from "../research.js";
@@ -20,6 +20,29 @@ function context(): Context {
     historicalResults: ["a", "b"].map(k => ({ id: `h${k}`, personId: `p${k}`, organizationId: "o1", organizationName: "試験高校", raceId: "old", raceSlug: "ordinary-332-heat-1", raceName: "普通", notes: "DNS", isStarter: false })),
   };
 }
+test("ekiden snapshot-only teams retain all individual results without organization-backed team writes", () => {
+  const data = input();
+  data.organizations = [
+    { key: "known", name: "花王", type: "corporate_team" },
+    ...(["unknown", "club", "company"] as const).map(type => ({ key: type, name: `仮称${type}`, type })),
+  ];
+  data.rows = data.organizations.map(o => ({ key: o.key, name: `選手${o.key}`, organizationKey: o.key, mark: "24:00", memberships: [], pbs: [] }));
+  data.teams = data.organizations.map(o => ({ organizationKey: o.key, leg: 1, cumulativeMark: "24:00" }));
+  const resolution = { organizationMap: { known: "o1" }, personMap: Object.fromEntries(data.rows.map(r => [r.key, `p-${r.key}`])), findings: [], changes: [], metrics: emptyMetrics() };
+  const emptyAgent = (agentKey: string) => ({ agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics() });
+  const plan = buildPlan("batch", data, context(), resolution, emptyAgent("membership"), emptyAgent("person_facts"), "apply");
+  assert.equal(plan.changes.filter(c => c.operation.kind === "race_result").length, 4);
+  const teams = plan.changes.filter(c => c.operation.kind === "team_result");
+  assert.equal(teams.length, 1);
+  assert.equal(teams[0].operation.kind === "team_result" && teams[0].operation.organizationId, "o1");
+  for (const type of ["unknown", "club", "company"]) {
+    const result = plan.changes.find(c => c.operation.kind === "race_result" && c.operation.row.key === type)!.operation;
+    assert.ok(result.kind === "race_result");
+    assert.equal(result.organizationNameSnapshot, `仮称${type}`);
+    assert.equal(result.organizationId, undefined);
+  }
+  assert.throws(() => buildPlan("batch", data, context(), { ...resolution, organizationMap: {} }, emptyAgent("membership"), emptyAgent("person_facts"), "apply"), /requires a normalized organization/);
+});
 test("person graph plans compact kanji names and preserves non-kanji separators", async () => {
   const data = input();
   data.rows = [

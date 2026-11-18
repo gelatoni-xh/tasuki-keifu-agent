@@ -13,6 +13,7 @@ import {
 } from "../database.js";
 import { DirectoryPayloadStore } from "../storage.js";
 import { EventRunner } from "../runner.js";
+import { buildBatchGraph } from "../graph.js";
 import type { Researcher } from "../research.js";
 import { CONTRACT_VERSION, manifestSchema, type Metrics } from "../contracts.js";
 import { deliverNotifications, enqueueReport } from "../notifications.js";
@@ -268,6 +269,38 @@ test("persisted checkpoint resumes an interrupted subgraph with a new runner ins
       .rows[0].n,
     2,
   );
+});
+test("completed legacy checkpoint drops snapshot-only team writes without rerunning research", async () => {
+  const data = manifest("legacy-snapshot-team");
+  data.batches = data.batches.slice(0, 1);
+  const batch = data.batches[0];
+  batch.organizations = [{ key: "temporary", name: "混成チーム", type: "unknown" }];
+  batch.rows[0].organizationKey = "temporary";
+  batch.rows[0].memberships = [];
+  batch.rows[0].pbs = [];
+  const id = await db.submit(data, store);
+  await assert.rejects(new EventRunner(db, store, saver, {
+    writeEnabled: true, researcher: noResearch, maxAttempts: 1,
+    beforeApply: async () => { throw new Error("pause before write"); },
+  }).run(id), /pause before write/);
+  const attempt = (await pool.query(
+    'SELECT a.* FROM governance."BatchAttempt" a JOIN governance."GovernanceBatch" b ON b.id=a."batchId" WHERE b."eventTaskId"=$1', [id],
+  )).rows[0];
+  const graph = buildBatchGraph({ loadContext: async () => { throw new Error("unexpected reload"); }, research: noResearch, checkpointer: saver });
+  const config = { configurable: { thread_id: attempt.graphThreadId } };
+  const state = await graph.getState(config);
+  const plan = state.values.plan!;
+  const obsolete = { ...plan.changes[0], key: "legacy-team", idempotencyKey: "legacy-team", operation: { kind: "team_result" as const, organizationId: undefined as unknown as string, team: { organizationKey: "temporary", leg: 1 } } };
+  await graph.updateState(config, { plan: { ...plan, changes: [...plan.changes, obsolete] } }, "aggregate_governance_result");
+  await pool.query(`INSERT INTO governance."GovernanceChange" (id,"batchId","changeKey","idempotencyKey",operation,"entityRef","patchAndEvidence",revision) VALUES('00000000-0000-4000-8000-000000000048',$1,'legacy-team','legacy-team','team_result','legacy-team',$2,1)`, [attempt.batchId, obsolete]);
+  await db.retry(id);
+  const report = await new EventRunner(db, store, saver, {
+    writeEnabled: true, researcher: async () => { throw new Error("unexpected model retry"); },
+  }).run(id);
+  assert.equal(report?.importedRows, 1);
+  assert.equal((await pool.query('SELECT "organizationNameSnapshot" FROM public."RaceResult"')).rows[0].organizationNameSnapshot, "混成チーム");
+  assert.equal((await pool.query('SELECT count(*)::int n FROM public."TeamCompetitionResult"')).rows[0].n, 0);
+  assert.equal((await pool.query('SELECT status FROM governance."GovernanceChange" WHERE id=\'00000000-0000-4000-8000-000000000048\'')).rows[0].status, "superseded");
 });
 test("crash after business commit does not duplicate import on retry", async () => {
   const id = await db.submit(manifest(), store);

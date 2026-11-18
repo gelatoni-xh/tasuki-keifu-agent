@@ -2,7 +2,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { journalResearch } from "./research-journal.js";
 import { NORMALIZATION_POLICY_VERSION } from "./normalization.js";
 import { withBusinessResearchContext } from "./research-context.js";
-import { buildBatchGraph } from "./graph.js";
+import { buildBatchGraph, type BatchGraphState } from "./graph.js";
 import {
   GovernanceDB,
   LeaseLostError,
@@ -18,7 +18,7 @@ import {
 import { emptyMetrics, type Plan, type Resolution } from "./contracts.js";
 import type { PayloadStore } from "./storage.js";
 import { BusinessWriter } from "./writer.js";
-import { buildMembershipOnlyPlan } from "./agents.js";
+import { buildMembershipOnlyPlan, buildPlan } from "./agents.js";
 import { normalizeName } from "./rules.js";
 import { enqueueReport, needsAttention, type Report } from "./notifications.js";
 import type { GovernanceTracer } from "./tracing.js";
@@ -172,8 +172,13 @@ export class EventRunner {
         // 有完整 checkpoint 时恢复已有状态；只有新 attempt 才提供初始输入。
         const snapshot = await graph.getState(config);
         let plan: Plan;
-        if (snapshot.values?.plan && !snapshot.next.length)
-          plan = snapshot.values.plan;
+        if (snapshot.values?.plan && !snapshot.next.length) {
+          // 重新执行纯计划装配，使旧 checkpoint 应用当前存储契约；不重跑模型判断。
+          const state = snapshot.values as BatchGraphState;
+          plan = state.context && state.resolution && state.membership && state.facts
+            ? buildPlan(batch.id, input, state.context, state.resolution, state.membership, state.facts, task.mode)
+            : state.plan;
+        }
         else if (task.inputManifest.agentMode === "membership_only") {
           const context = await this.db.loadContext(task, input);
           const organizationMap = Object.fromEntries(input.organizations.map(o => {

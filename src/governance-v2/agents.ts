@@ -1198,8 +1198,13 @@ export function buildPlan(
       "保存原始比赛成绩及年级快照",
     ),
   );
-  const teams = input.teams.map((t) =>
-    change(
+  // 未确认组织仅保存个人成绩上的参赛名称；队伍表要求真实组织外键。
+  const teams = input.teams.filter((t) => !["unknown", "club", "company"].includes(
+    input.organizations.find((o) => o.key === t.organizationKey)!.type,
+  )).map((t) => {
+    if (!res.organizationMap[t.organizationKey])
+      throw new Error(`Team result requires a normalized organization: ${t.organizationKey}`);
+    return change(
       batchId,
       `team:${t.organizationKey}:${t.leg}`,
       {
@@ -1209,8 +1214,8 @@ export function buildPlan(
       },
       "import",
       "保存队伍及分区累计成绩",
-    ),
-  );
+    );
+  });
   const agents = [normalization, membership, facts],
     changes = [
       ...new Map(
