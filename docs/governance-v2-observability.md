@@ -25,6 +25,14 @@
 
 数据库保留业务事实和审计，LangSmith 展示执行轨迹，站点提供任务入口和业务视图。未来是否进一步联动，需要单独设计关联标识、权限和展示方式。
 
+## Studio Graph 结构视图
+
+`langgraph.json` 注册 `governance_v2_structure`，加载 `src/governance-v2/studio-graph.ts`。它直接复用生产的 `buildBatchGraph()`，因此节点、边和子图随代码更新；适配器不连接业务数据库、不提供真实研究器或 checkpoint，并在任何节点执行前报错。Studio 只用于浏览结构，不是治理任务入口。生产治理仍由持有数据库租约的 `EventRunner` 发起。Tracing 项目中的运行树与 Studio 的完整 Graph 结构是两种不同视图；前者不会自动注册 Agent Server。
+
+2026-11-18 本地验证：Graph 导出包含 18 个节点、20 条边；LangGraph CLI 1.8.0 的开发 Agent Server 注册了 `governance_v2_structure`，`/ok`、`/assistants/search` 和 `/assistants/governance_v2_structure/graph` 均返回预期结果。类型检查与 62 项治理单测通过。这只验证结构加载，不代表生产 Agent Server 已部署。
+
+用户选择在自有 Ubuntu-3 上部署独立 Agent Server，连接 LangSmith Studio。正式自建服务需要 `LANGGRAPH_CLOUD_LICENSE_KEY`、LangSmith API key、独立的 PostgreSQL 数据库和 Redis；还需限制 Studio 入口的访问权限，并将服务构建和发布并入现有主分支部署。当前主机约 2 GiB 内存，检查时可用约 794 MiB；现有治理环境未配置许可、Redis 或 Agent Server 数据库。满足这些条件并完成容量验证前，不应将开发模式 `langgraph dev` 作为生产常驻服务，也不应把 Studio 执行入口接到现有 worker 或业务数据库。生产 Studio URL 和部署 Revision 待实际发布后记录。
+
 ## 当前已实现的 LangSmith 接入
 
 当前独立工作区的 v2 CLI 在 `run`、`work-once`、`worker` 命令中，开启 `GOVERNANCE_LANGSMITH_TRACING=true` 后，每个 batch attempt 建立根 run；Graph 节点与实际 Responses API 请求作为子 run。`membership_only` 绕过 Graph，仍记录 attempt 和研究请求。研究内部重试按实际物理请求分别计数；web search 是 Responses 内部工具调用，不是独立 LangGraph 节点。
@@ -60,6 +68,7 @@ LangSmith 客户端使用 1 秒超时，传输层在失败时立即停止 SDK �
 | --- | --- | --- | --- |
 | P0 | v2 完整 Graph 与研究 tracing | 已部署（合成验证通过） | Graph 输入输出、节点流转与研究请求可查；观测故障不影响治理。 |
 | P0 | 真实 v2 任务端到端核验 | 待验证 | 同一 task 的 attempt、节点、模型重试和搜索计数与数据库指标一致，失败及恢复路径可辨。 |
+| P1 | Studio Graph 结构视图 | 代码已验证，生产待部署 | 自建 Agent Server 可供 Studio 读取完整拓扑；Studio 运行不触发治理；需许可、独立存储、访问控制及容量验证。 |
 | P1 | 统一任务关联与跳转 | 待讨论 | 从站点任务或批次能定位相应 LangSmith trace；无 trace 时显示明确原因，不泄漏密钥。 |
 | P1 | 指标口径和数据质量检查 | 待讨论 | 站点、报告、数据库、LangSmith 的调用数/耗时/费用差异有解释；失败尝试不会漏计或重计。 |
 | P1 | 观测页的信息结构和异常定位 | 待讨论 | 能快速从失败任务定位到 attempt、当前节点、失败类别、重试及未解决问题；移动端可读。 |

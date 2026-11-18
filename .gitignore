@@ -7,3 +7,6 @@ dist/
 .DS_Store
 .turbo/
 coverage/
+
+# LangGraph API
+.langgraph_api

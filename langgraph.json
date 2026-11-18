@@ -1,0 +1,8 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "governance_v2_structure": "./src/governance-v2/studio-graph.ts:graph"
+  },
+  "node_version": "22"
+}
