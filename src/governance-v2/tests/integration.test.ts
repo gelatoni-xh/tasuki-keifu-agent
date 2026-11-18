@@ -732,3 +732,50 @@ test("duplicate membership cleanup deletes the duplicate and preserves its sourc
   assert.ok(audit[0].oldValue);
   assert.ok(JSON.stringify(rows[0].dateEvidence).includes("deduplicatedMembership"));
 });
+
+test("membership-only graph persists year precision and never reintroduces race-day joining dates", async () => {
+  await pool.query(`UPDATE public."Organization" SET type='corporate_team' WHERE id='u';
+    INSERT INTO public."Membership"(id,"personId","organizationId",type,"startDate","startYear","startDateBasis","dateEvidence","updatedAt")
+    VALUES('mc','p','u','affiliated','2020-04-01',2020,'source','{"originalSource":"retained"}',now());`);
+  const input = manifestSchema.parse(manifest("membership-year-only"));
+  input.agentMode = "membership_only";
+  input.batches = input.batches.slice(0, 1);
+  input.batches[0].organizations[0].type = "corporate_team";
+  input.batches[0].rows[0].memberships = [{ organizationKey: "u", type: "affiliated", startDate: "2024-04-01", endState: "unknown" }];
+  let calls = 0;
+  const id = await db.submit(input, store);
+  const report = await new EventRunner(db, store, saver, { writeEnabled: true, researcher: async request => {
+    calls++; assert.equal(request.kind, "membership_conflict");
+    const evidence = [{ url: "https://official.example/join", quote: "2022年入部。" }];
+    return { evidence, answer: { verdict: "correct_membership", reason: "仅能确认加入年份，清除错误具体日", targetId: null,
+      duplicateIds: [], evidence, split: null, corrections: [{ membershipId: "mc", startDate: null, endDate: null, startYear: 2022 }] } };
+  } }).run(id);
+  assert.equal(report?.status, "completed"); assert.equal(calls, 1);
+  const stored = (await pool.query('SELECT * FROM public."Membership" WHERE id=\'mc\'')).rows[0];
+  assert.equal(stored.startDate, null); assert.equal(stored.startYear, 2022); assert.equal(stored.startDateBasis, "source");
+  assert.equal(stored.dateEvidence.originalSource, "retained");
+  const checkpoints = (await pool.query('SELECT checkpoint_ns FROM governance_checkpoint.checkpoints WHERE thread_id IN (SELECT "graphThreadId" FROM governance."BatchAttempt")')).rows;
+  assert.ok(checkpoints.length > 0);
+  const again = structuredClone(input); again.requestKey = "membership-year-preserved"; again.batches[0].rows[0].memberships = [];
+  const next = await db.submit(again, store);
+  assert.equal((await new EventRunner(db, store, saver, { writeEnabled: true, researcher: noResearch }).run(next))?.status, "completed");
+  const retained = (await pool.query('SELECT * FROM public."Membership" WHERE id=\'mc\'')).rows[0];
+  assert.equal(retained.startDate, null); assert.equal(retained.startYear, 2022); assert.equal(retained.startDateBasis, "source");
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM public."RaceResult"')).rows[0].n, 0);
+});
+
+test("deduplication retains every source footprint across multiple duplicate memberships", async () => {
+  await pool.query(`INSERT INTO public."Membership"(id,"personId","organizationId",type,"dateEvidence","updatedAt") VALUES
+    ('mh-copy-1','p','h','enrolled','{"sourceLabel":"first duplicate"}',now()),
+    ('mh-copy-2','p','h','enrolled','{"sourceLabel":"second duplicate"}',now());`);
+  const input = manifestSchema.parse(manifest("multi-membership-dedup"));
+  input.batches = input.batches.slice(0, 1);
+  const id = await db.submit(input, store);
+  assert.equal((await new EventRunner(db, store, saver, { writeEnabled: true, researcher: noResearch }).run(id))?.status, "completed");
+  const rows = (await pool.query('SELECT * FROM public."Membership" WHERE "personId"=\'p\' AND "organizationId"=\'h\'')).rows;
+  assert.equal(rows.length, 1);
+  const audit = (await pool.query('SELECT "oldValue" FROM public."AuditLog" WHERE "entityType"=\'Membership\' AND action=\'delete\'')).rows;
+  assert.equal(audit.length, 2);
+  const kept = JSON.stringify(rows[0].dateEvidence);
+  assert.ok(kept.includes("first duplicate")); assert.ok(kept.includes("second duplicate"));
+});

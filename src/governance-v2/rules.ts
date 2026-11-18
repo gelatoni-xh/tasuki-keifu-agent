@@ -127,20 +127,34 @@ export function adjacentSchoolWindow(
   return null;
 }
 export function fillUnknownDates(existing: Window, incoming: Window): Window {
-  const replaceStart =
-    !existing.startDate ||
-    (existing.startBasis === "inferred" && incoming.startBasis === "source");
-  const replaceEnd =
-    !existing.endDate ||
-    (existing.endBasis === "inferred" && incoming.endBasis === "source");
+  const replaceStart = (!!incoming.startDate || incoming.startYear !== undefined) && (
+    (!existing.startDate && existing.startYear === undefined) ||
+    (existing.startBasis === "inferred" && incoming.startBasis === "source") ||
+    (!existing.startDate && !!incoming.startDate && incoming.startBasis === "source" &&
+      existing.startYear === Number(incoming.startDate.slice(0, 4))));
+  const replaceEnd = (!!incoming.endDate || incoming.endYear !== undefined) && (
+    (!existing.endDate && existing.endYear === undefined) ||
+    (existing.endBasis === "inferred" && incoming.endBasis === "source") ||
+    (!existing.endDate && !!incoming.endDate && incoming.endBasis === "source" &&
+      existing.endYear === Number(incoming.endDate.slice(0, 4))));
   return {
+    startYear: replaceStart ? incoming.startYear ?? (incoming.startDate ? Number(incoming.startDate.slice(0, 4)) : existing.startYear) : existing.startYear,
+    endYear: replaceEnd ? incoming.endYear ?? (incoming.endDate ? Number(incoming.endDate.slice(0, 4)) : existing.endYear) : existing.endYear,
     startDate: replaceStart ? incoming.startDate : existing.startDate,
     endDate: replaceEnd ? incoming.endDate : existing.endDate,
     startBasis: replaceStart ? incoming.startBasis : existing.startBasis,
     endBasis: replaceEnd ? incoming.endBasis : existing.endBasis,
     endState:
       incoming.endState !== "unknown" ? incoming.endState : existing.endState,
-    evidence: { ...existing.evidence, ...incoming.evidence },
+    evidence: {
+      ...existing.evidence, ...incoming.evidence,
+      ...((existing.evidence?.raceObservations || incoming.evidence?.raceObservations) ? {
+        raceObservations: [...new Map([
+          ...((existing.evidence?.raceObservations as unknown[]) ?? []),
+          ...((incoming.evidence?.raceObservations as unknown[]) ?? []),
+        ].map(observation => [fingerprint(observation), observation])).values()],
+      } : {}),
+    },
   };
 }
 export function definiteOverlap(a: Window, b: Window) {

@@ -572,3 +572,20 @@ test("identical membership duplicates produce executable deletion; dated separat
     assert.equal(result.findings.some(f => f.code === "membership_unresolved"), separate);
   }
 });
+
+test("confirmed organization aliases reuse existing IDs; duplicate candidates never authorize stored organization merges", async () => {
+  const { normalizeOrganizations } = await import("../agents.js");
+  const data = input(), ctx = context();
+  data.organizations[0].name = "旧称高校";
+  ctx.organizations[0].aliases = ["旧称高校"];
+  const first = await normalizeOrganizations("alias", data, ctx, async () => assert.fail("Exact alias should be deterministic"));
+  assert.equal(first.organizationMap.o, ctx.organizations[0].id);
+  assert.equal(first.changes.some(c => c.operation.kind === "create_organization"), false);
+  ctx.organizations.push({ ...ctx.organizations[0], id: "duplicate-org", slug: "duplicate-org" });
+  const second = await normalizeOrganizations("duplicates", data, ctx, async () => ({ answer: {
+    verdict: "merge", targetId: ctx.organizations[0].id, duplicateIds: ["duplicate-org"], reason: "不能授权存量合并",
+    corrections: [], split: null, evidence: [{ url: "https://example.com/history", quote: "沿革" }],
+  }, evidence: [{ url: "https://example.com/history", quote: "沿革" }] }));
+  assert.equal(second.changes.some(c => c.operation.kind === "merge_organization"), false);
+  assert.ok(second.findings.some(f => f.code === "organization_duplicate_candidates" && f.status === "informational"));
+});

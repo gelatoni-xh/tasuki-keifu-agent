@@ -559,3 +559,33 @@ test("HTTP 200 JSON failures and truncated SSE retain actionable diagnostics", a
     assert.equal(truncated.researchCalls![0].diagnostic?.code, 'stream_missing_completion');
   } finally { globalThis.fetch = original; }
 });
+
+test("membership wire supports keep and nullable year precision without changing identity schema", async () => {
+  const original = globalThis.fetch;
+  let kind: "membership_conflict" | "person_identity" = "membership_conflict";
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const schema = body.text.format.schema;
+    if (kind === "membership_conflict") {
+      assert.ok(schema.properties.verdict.enum.includes("keep_membership"));
+      const correction = schema.properties.corrections.items;
+      assert.deepEqual([...correction.required].sort(), Object.keys(correction.properties).sort());
+      assert.ok(correction.properties.startYear.anyOf.some((s: { type: string }) => s.type === "null"));
+      assert.equal(correction.additionalProperties, false);
+    } else {
+      assert.equal(schema.properties.verdict.enum.includes("keep_membership"), false);
+      assert.equal(schema.properties.corrections.items.properties.startYear, undefined);
+    }
+    const result = kind === "membership_conflict" ? { ...answer, verdict: "keep_membership", targetId: null } : answer;
+    return new Response(JSON.stringify({ status: "completed", output: [
+      { type: "web_search_call", action: { sources: [{ url: "https://example.org/official" }] } },
+      { type: "message", content: [{ type: "output_text", text: JSON.stringify(result) }] },
+    ] }), { headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const research = createResearcher({ apiKey: "test", model: "mock", timeoutMs: 1000 });
+    assert.equal((await research({ ...request, kind }, emptyMetrics())).answer?.verdict, "keep_membership");
+    kind = "person_identity";
+    assert.equal((await research({ ...request, kind }, emptyMetrics())).answer?.verdict, "match");
+  } finally { globalThis.fetch = original; }
+});

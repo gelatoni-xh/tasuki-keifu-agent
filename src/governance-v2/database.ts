@@ -374,6 +374,10 @@ export class GovernanceDB {
         organizationId: m.organizationId,
         type: m.type,
         organizationType: m.organizationType,
+        role: m.role,
+        faculty: m.faculty ?? undefined, department: m.department ?? undefined, cohort: m.cohort ?? undefined,
+        startYear: m.startYear ?? undefined,
+        endYear: m.endYear ?? undefined,
         startDate: date(m.startDate),
         endDate: date(m.endDate),
         startBasis: basis(m.startDateBasis),
@@ -402,7 +406,7 @@ export class GovernanceDB {
       const orgNames = input.organizations.map((o) => normalizeName(o.name));
       const orgRows = (
         await c.query(
-          `SELECT o.*, COALESCE((SELECT array_agg(n.value) FROM public."NameVariant" n WHERE n."organizationId"=o.id),'{}') AS aliases FROM public."Organization" o WHERE lower(regexp_replace(normalize(o."nameJa",NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]) OR lower(regexp_replace(normalize(COALESCE(o."shortName",''),NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]) OR LEFT(normalize(o."nameJa",NFKC),2)=ANY($3::text[]) OR o.slug=ANY($4::text[]) OR o.id=ANY($2::text[]) OR EXISTS(SELECT 1 FROM public."NameVariant" n WHERE n."organizationId"=o.id AND lower(regexp_replace(normalize(n.value,NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]))`,
+          `SELECT o.*, COALESCE((SELECT array_agg(n.value) FROM public."NameVariant" n WHERE n."organizationId"=o.id),'{}') AS aliases FROM public."Organization" o WHERE lower(regexp_replace(normalize(o."nameJa",NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]) OR lower(regexp_replace(normalize(COALESCE(o."shortName",''),NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]) OR LEFT(normalize(o."nameJa",NFKC),2)=ANY($3::text[]) OR o.slug=ANY($4::text[]) OR o.id=ANY($2::text[]) OR EXISTS(SELECT 1 FROM public."NameVariant" n WHERE n."organizationId"=o.id AND (lower(regexp_replace(normalize(n.value,NFKC),'[[:space:]・･]','','g'))=ANY($1::text[]) OR LEFT(normalize(n.value,NFKC),2)=ANY($3::text[])))`,
           [
             orgNames,
             [
