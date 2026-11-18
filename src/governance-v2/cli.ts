@@ -9,6 +9,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { GovernanceDB, createGovernancePool } from "./database.js";
 import { DirectoryPayloadStore } from "./storage.js";
 import { EventRunner } from "./runner.js";
+import { createGovernanceTracer, disableAutomaticGraphTracing } from "./tracing.js";
 import {
   createMailTransport,
   deliverNotifications,
@@ -160,6 +161,11 @@ async function main() {
       return;
     }
     if (command === "run" || command === "work-once" || command === "worker") {
+      let tracer: ReturnType<typeof createGovernanceTracer>;
+      try { tracer = createGovernanceTracer(); }
+      catch { console.warn("governance LangSmith tracing disabled: initialization failed"); }
+      // Graph 使用显式回调；关闭环境变量触发的默认 tracer，避免额外长时间重试。
+      disableAutomaticGraphTracing();
       if (
         process.env.GOVERNANCE_WRITE_ENABLED === "true" &&
         !process.env.GOVERNANCE_READ_DATABASE_URL
@@ -183,6 +189,7 @@ async function main() {
           researchRequests,
         }));
       const runner = new EventRunner(db, store, saver, {
+        tracer,
         writeEnabled: process.env.GOVERNANCE_WRITE_ENABLED === "true",
         research: {
           apiKey: process.env.OPENAI_API_KEY,

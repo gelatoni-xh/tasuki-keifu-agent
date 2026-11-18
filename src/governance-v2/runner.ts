@@ -21,6 +21,7 @@ import { BusinessWriter } from "./writer.js";
 import { buildMembershipOnlyPlan } from "./agents.js";
 import { normalizeName } from "./rules.js";
 import { enqueueReport, needsAttention, type Report } from "./notifications.js";
+import type { GovernanceTracer } from "./tracing.js";
 
 export type RunnerOptions = {
   writeEnabled: boolean;
@@ -32,6 +33,7 @@ export type RunnerOptions = {
   beforeApply?: () => Promise<void>;
   inputCostPerMillionUsd?: number;
   outputCostPerMillionUsd?: number;
+  tracer?: GovernanceTracer;
 };
 export class EventRunner {
   constructor(
@@ -112,6 +114,7 @@ export class EventRunner {
       throw error;
     } finally {
       clearInterval(timer);
+      await this.options.tracer?.flush();
     }
   }
   private async runBatch(task: Task, batch: Batch) {
@@ -126,6 +129,11 @@ export class EventRunner {
     let fresh = false;
     for (let n = 0; n < (this.options.maxAttempts ?? 3); n++) {
       const attempt = await this.db.attempt(task, batch, fresh);
+      const trace = this.options.tracer?.startAttempt({
+        taskId: task.id, batchId: batch.id, attemptId: attempt.id,
+        graphThreadId: attempt.graphThreadId, mode: task.mode,
+        agentMode: task.inputManifest.agentMode ?? "full",
+      }, input);
       const reserve = async (kind: import("./research.js").ResearchRequest["kind"], retry = false) =>
         this.db.fenced(task, async (c) => {
           const normalization = kind.startsWith("normalization_") || kind === "organization_adjudication";
@@ -142,10 +150,11 @@ export class EventRunner {
           );
           return true;
         });
+      const instrumentResearch = (researcher: Researcher) => trace ? trace.research(researcher) : researcher;
       const research = journalResearch(this.db, task, attempt.id, {
         policy: NORMALIZATION_POLICY_VERSION, model: this.options.research?.model,
         endpoint: this.options.research?.baseUrl,
-      }, withBusinessResearchContext(
+      }, instrumentResearch(withBusinessResearchContext(
         this.db,
         this.options.researcher ??
           createResearcher({
@@ -156,7 +165,7 @@ export class EventRunner {
             outputCostPerMillionUsd: this.options.outputCostPerMillionUsd,
             reserve,
           }),
-      ));
+      )));
       const graph = buildBatchGraph({
         loadContext: () => this.db.loadContext(task, input),
         research,
@@ -173,6 +182,8 @@ export class EventRunner {
       });
       const config = {
         configurable: { thread_id: attempt.graphThreadId },
+        metadata: { taskId: task.id, batchId: batch.id, attemptId: attempt.id },
+        callbacks: this.options.tracer?.graphCallbacks(),
         recursionLimit: 100,
       };
       try {
@@ -248,8 +259,15 @@ export class EventRunner {
               },
             );
         });
+        trace?.end("succeeded", {
+          llmCalls: plan.agents.reduce((n, a) => n + a.metrics.llmCalls, 0),
+          networkCalls: plan.agents.reduce((n, a) => n + a.metrics.networkCalls, 0),
+          inputTokens: plan.agents.reduce((n, a) => n + a.metrics.inputTokens, 0),
+          outputTokens: plan.agents.reduce((n, a) => n + a.metrics.outputTokens, 0),
+        }, plan);
         return;
       } catch (error) {
+        trace?.end("failed");
         if (error instanceof LeaseLostError) throw error;
         await this.db.fenced(task, async (c) => {
           await c.query(
