@@ -262,6 +262,7 @@ export type Operation =
       value: string;
     }
   | { kind: "membership"; membership: Membership }
+  | { kind: "delete_membership"; membershipId: string; personId: string; organizationId: string; retainedId: string }
   | { kind: "person_fact"; personId: string; field: "hometown"; value: string }
   | {
       kind: "personal_best";

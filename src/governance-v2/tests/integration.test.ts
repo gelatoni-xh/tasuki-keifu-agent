@@ -675,3 +675,27 @@ test("exhausted LLM retries stay journaled across task recovery and retain separ
     assert.equal(calls, 3, "Recovery must not reset the exhausted model retry allowance");
   } finally { globalThis.fetch = original; }
 });
+
+test("duplicate membership cleanup deletes the duplicate and preserves its source in audit", async () => {
+  await pool.query(`INSERT INTO public."Membership"
+    (id,"personId","organizationId",type,"dateEvidence","updatedAt")
+    VALUES('mh-duplicate','p','h','enrolled','{"originalEvidence":"second source"}',now())`);
+  const input = manifestSchema.parse(manifest("membership-dedup"));
+  input.batches = input.batches.slice(0, 1);
+  input.batches[0].organizations = [{ key: "h", name: "試験高校", type: "high_school" }];
+  input.batches[0].rows = [{
+    key: "row", sourceKey: "athlete-1", name: "試験太郎",
+    organizationKey: "h", memberships: [], pbs: [],
+  }];
+  const id = await db.submit(input, store);
+  const report = await new EventRunner(db, store, saver, {
+    writeEnabled: true, researcher: noResearch,
+  }).run(id);
+  assert.equal(report?.status, "completed");
+  const rows = (await pool.query('SELECT * FROM public."Membership" WHERE "personId"=\'p\' AND "organizationId"=\'h\'')).rows;
+  assert.equal(rows.length, 1);
+  const audit = (await pool.query('SELECT * FROM public."AuditLog" WHERE "entityType"=\'Membership\' AND action=\'delete\'')).rows;
+  assert.equal(audit.length, 1);
+  assert.ok(audit[0].oldValue);
+  assert.ok(JSON.stringify(rows[0].dateEvidence).includes("deduplicatedMembership"));
+});

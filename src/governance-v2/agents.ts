@@ -401,16 +401,22 @@ export async function normalizePeople(
     // prevents ordinary university-to-company transitions from falling into
     // expensive identity research.
     const nonConflictingCandidates = (() => {
-      if (!orgId || sourceOrganization?.type !== "corporate_team" || candidates.length < 2)
+      if (!orgId || sourceOrganization?.type !== "corporate_team" || candidates.length < 1)
         return undefined;
       const memberships = new Map(
         candidates.map((p) => [p.id, ctx.memberships.filter((m) => m.personId === p.id)]),
       );
-      if (!candidates.some((p) => memberships.get(p.id)?.some((m) => m.organizationId === orgId)))
+      if (!candidates.every(p => normalizeName(p.displayNameJa) === normalizeName(row.name)))
         return undefined;
+      // Different corporate teams require adjudication even with incomplete dates.
+      if (candidates.some(p => memberships.get(p.id)!.some(m =>
+        m.organizationType === "corporate_team" && m.organizationId !== orgId)))
+        return undefined;
+      const births = new Set(candidates.map(p => p.birthDate).filter(Boolean));
+      if (births.size > 1) return undefined;
       const hasConflict = candidates.some((a, index) =>
         candidates.slice(index + 1).some((b) =>
-          memberships.get(a.id)!.some((ma) => memberships.get(b.id)!.some((mb) => membershipConflict(ma, mb))),
+          memberships.get(a.id)!.some((ma) => memberships.get(b.id)!.some((mb) => membershipConflict(ma, { ...mb, personId: ma.personId }))),
         ),
       );
       if (hasConflict) return undefined;
@@ -809,11 +815,19 @@ export async function governMemberships(
         if (sameRecord) {
           // Duplicate rows produced by a person merge are not a business
           // conflict; keep the row with the strongest source/date footprint.
-          existing = [existing.sort((a, b) =>
+          const keep = [...existing].sort((a, b) =>
             Number(!!b.evidence) - Number(!!a.evidence) ||
-            Number(!!b.startDate) - Number(!!a.startDate) ||
             a.id.localeCompare(b.id),
-          )[0]];
+          )[0];
+          for (const duplicate of existing.filter(m => m.id !== keep.id)) {
+            out.changes.push(change(batchId, `delete_membership:${duplicate.id}`,
+              { kind: "delete_membership", membershipId: duplicate.id,
+                personId, organizationId, retainedId: keep.id },
+              "membership", "删除同人同组织同类型且时间字段一致的重复履历",
+              duplicate.updatedAt ? { [`membership:${duplicate.id}`]: duplicate.updatedAt } : {}));
+            all.delete(duplicate.id);
+          }
+          existing = [keep];
           out.metrics.normalizationRuleMatches ??= [];
           out.metrics.normalizationRuleMatches.push({
             subjectRef: row.key,

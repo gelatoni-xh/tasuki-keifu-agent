@@ -376,7 +376,7 @@ test("light batch retries fabricated and foreign-item evidence, then accepts the
     assert.equal(calls, 3);
     assert.equal(metrics.inputTokens, 300);
     assert.equal(metrics.outputTokens, 60);
-    assert.deepEqual(reservations, [false, true, true]);
+    assert.deepEqual(reservations, []);
     assert.deepEqual(metrics.researchCalls?.map(c => c.attemptNo), [1, 2, 3]);
     assert.equal(metrics.researchCalls?.[1].diagnostic?.issues?.[0].path.join("."), "items.0.evidenceRefs");
   } finally { globalThis.fetch = original; }

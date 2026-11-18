@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
-import { normalizePeople } from "../agents.js";
+import { normalizePeople, governMemberships } from "../agents.js";
 import { buildBatchGraph } from "../graph.js";
 import { manifestSchema, CONTRACT_VERSION, emptyMetrics, type Context } from "../contracts.js";
 import type { Researcher, ResearchRequest } from "../research.js";
@@ -493,4 +493,59 @@ test("cross-check removes unrelated known evidence and keeps unsupported referen
   assert.deepEqual(state.issues[0].evidenceRefs, ["source:unrelated"]);
   state.issues[0].evidenceRefs = ["invented"];
   assert.throws(() => validateCrossCheck(data, state, context()), /unsupported/);
+});
+
+
+test("a university graduate entering a corporate team resolves without research", async () => {
+  const data = input(), ctx = context();
+  data.organizations[0].type = "corporate_team";
+  data.rows = [data.rows[0]];
+  ctx.people = [ctx.people[0]];
+  ctx.memberships = [{ id: "school-history", personId: "pa", organizationId: "university",
+    organizationType: "university", type: "enrolled", startBasis: "unknown",
+    endBasis: "unknown", endState: "unknown" }];
+  const result = await normalizePeople("b", data, ctx,
+    { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+    async () => { throw new Error("no research expected"); });
+  assert.equal(result.personMap.a, "pa");
+  assert.equal(result.changes.some(c => c.operation.kind === "create_person"), false);
+});
+
+test("different corporate teams and contradictory birthdays prevent automatic duplicate merging", async () => {
+  for (const scenario of ["team", "birthday", "homophone", "school"]) {
+    const data = input(), ctx = context();
+    data.organizations[0].type = "corporate_team";
+    data.rows = [data.rows[0]];
+    data.rows[0].kana = "センシュ";
+    ctx.people = [
+      { id: "pa", slug: "a", displayNameJa: data.rows[0].name, displayNameKana: "センシュ", birthDate: "1998-01-01" },
+      { id: "pb", slug: "b", displayNameJa: scenario === "homophone" ? "別漢字" : data.rows[0].name,
+        displayNameKana: "センシュ", birthDate: scenario === "birthday" ? "1999-01-01" : "1998-01-01" },
+    ];
+    ctx.memberships = [
+      { id: "m1", personId: "pa", organizationId: scenario === "school" ? "u1" : "team", organizationType: scenario === "school" ? "university" : "corporate_team", type: scenario === "school" ? "enrolled" : "affiliated", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+      { id: "m2", personId: "pb", organizationId: scenario === "team" ? "other-team" : "u2", organizationType: scenario === "team" ? "corporate_team" : "university", type: scenario === "team" ? "affiliated" : "enrolled", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+    ];
+    const result = await normalizePeople("b", data, ctx,
+      { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+      async () => ({ evidence: [] }), true);
+    assert.equal(result.changes.some(c => c.operation.kind === "merge_person"), false, scenario);
+  }
+});
+
+test("identical membership duplicates produce executable deletion; dated separate spells stay for review", async () => {
+  for (const separate of [false, true]) {
+    const data = input(), ctx = context();
+    data.rows = [data.rows[0]];
+    ctx.memberships = ["m1", "m2"].map(id => ({
+      id, personId: "pa", organizationId: "o1", organizationType: "high_school", type: "enrolled",
+      startDate: separate && id === "m2" ? "2021-04-01" : undefined,
+      startBasis: "unknown", endBasis: "unknown", endState: "unknown",
+    }));
+    const result = await governMemberships("b", data, ctx,
+      { organizationMap: { o: "o1" }, personMap: { a: "pa" }, findings: [], changes: [], metrics: emptyMetrics() },
+      async () => { throw new Error("duplicate cleanup needs no LLM"); });
+    assert.equal(result.changes.filter(c => c.operation.kind === "delete_membership").length, separate ? 0 : 1);
+    assert.equal(result.findings.some(f => f.code === "membership_unresolved"), separate);
+  }
 });
