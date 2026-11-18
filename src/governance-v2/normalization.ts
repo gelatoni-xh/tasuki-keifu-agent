@@ -1,3 +1,5 @@
+// 修改归一化阶段、候选门槛或核查规则时，主动提醒用户评估观测页三语图例与悬浮说明。
+// 阶段性实验不必每次同步；待发布版本确定后再按实际 diff 核对。
 import type { BatchInput, Context, Metrics, Resolution } from "./contracts.js";
 import { emptyMetrics } from "./contracts.js";
 import { normalizeOrganizations, normalizePeople } from "./agents.js";

@@ -1,3 +1,5 @@
+// 修改被 Graph 使用的基础规则时，主动提醒用户核对观测页对应节点的三语规则说明。
+// 阶段性调整可暂缓同步，待发布版本确定后再检查实际 diff。
 import { createHash } from "node:crypto";
 import type { Basis, Membership, Window } from "./contracts.js";
 
