@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
-export const RULE_VERSION = "2026-11-13.2";
+export const RULE_VERSION = "2026-11-18.1";
 // CONTRACT_VERSION 描述数据形状；RULE_VERSION 描述治理判断规则，二者变更含义不同。
 const text = z.string().trim().min(1);
 export const orgTypes = [

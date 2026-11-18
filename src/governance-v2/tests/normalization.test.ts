@@ -75,6 +75,38 @@ test("unknown, club, and company entries stay as race-name snapshots", async () 
   assert.equal(result.plan.changes.some((change) => change.operation.kind === "membership"), false);
 });
 
+test("corporate-team identity merge ignores non-conflicting university history", async () => {
+  const data = input();
+  data.organizations = [{ key: "o", name: "花王", type: "corporate_team" }];
+  data.rows = [{ key: "ledama", name: "KISAISA LEDAMA", organizationKey: "o", memberships: [], pbs: [] }];
+  const ctx = context();
+  ctx.organizations = [
+    { id: "team", slug: "kao", nameJa: "花王", type: "corporate_team" },
+    { id: "university", slug: "school", nameJa: "試験大学", type: "university" },
+  ];
+  ctx.people = [
+    { id: "canonical", slug: "canonical", displayNameJa: "KISAISA LEDAMA" },
+    { id: "duplicate", slug: "duplicate", displayNameJa: "KISAISA LEDAMA" },
+  ];
+  ctx.memberships = [
+    { id: "m1", personId: "canonical", organizationId: "team", organizationType: "corporate_team", type: "affiliated", startBasis: "unknown", endBasis: "unknown", endState: "unknown" },
+    { id: "m2", personId: "duplicate", organizationId: "university", organizationType: "university", type: "enrolled", startBasis: "source", endBasis: "source", startDate: "2020-04-01", endDate: "2024-03-31", endState: "ended" },
+  ];
+  ctx.historicalResults = [
+    { id: "h1", personId: "canonical", organizationId: "team", raceId: "old1", raceSlug: "old1", raceName: "旧赛", raceDate: "2025-01-01" },
+    { id: "h2", personId: "canonical", organizationId: "team", raceId: "old2", raceSlug: "old2", raceName: "旧赛", raceDate: "2025-02-01" },
+    { id: "h3", personId: "duplicate", organizationId: "university", raceId: "old3", raceSlug: "old3", raceName: "旧赛", raceDate: "2024-01-01" },
+  ];
+  const result = await normalizePeople(
+    "b", data, ctx,
+    { organizationMap: { o: "team" }, personMap: {}, findings: [], changes: [], metrics: emptyMetrics() },
+    async () => { throw new Error("non-conflicting identities must not call research"); },
+  );
+  assert.equal(result.personMap.ledama, "canonical");
+  assert.ok(result.changes.some(c => c.operation.kind === "merge_person" && c.operation.duplicateId === "duplicate"));
+  assert.equal(result.metrics.normalizationRuleMatches?.[0]?.rule, "non_conflicting_corporate_team_identity_merge");
+});
+
 function items(r: ResearchRequest) { return (r.context as { items: Array<{ itemKey: string; allowedIds: string[]; evidence: Array<{ key: string }> }> }).items; }
 const match: Researcher = async r => r.kind === "person_identity"
   ? { answer: { verdict: "unresolved", targetId: null, duplicateIds: [], reason: "独立冲突需保留待确认", evidence: [], corrections: [], split: null }, evidence: [] }

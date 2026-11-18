@@ -55,7 +55,7 @@ unitType 支持 leg/heat/group；sequence 非负且任务内唯一，按数字�
 
 组织 key、行 key 任务批内分别唯一，所属引用必须在该批 organizations 里。结构损坏直接报错，不静默丢行。业务疑难允许未知日期、空 PB、未知组织类型；unresolved 不阻断有效输入导入。已撤回的第 103 回箱根预选数据仍不允许导入。
 
-Membership 可填 grade、startDate/endDate、endState。日期格式 YYYY-MM-DD；endState 默认为 unknown，不凭缺失结束日期当作 ongoing。来源行没有显式 `memberships` 时，已确认的初中、高中、大学和实业团组织也会由参赛组织生成一条 Membership 观察；没有日期时先写入空日期记录，再用已有不重叠履历推理可解释的时间窗口。Club、company、unknown、地方代表和选拔队不自动生成 Membership。DNS 不代表实际出场，但只要来源给出了已确认学校或实业团，仍进入 Membership 治理。普通职业团体/俱乐部不默认互斥；有明确业务依据时提供 exclusivityGroup=employment/team_registration。
+Membership 可填 grade、startDate/endDate、endState。日期格式 YYYY-MM-DD；endState 默认为 unknown；当前仍在所属中的关系使用 `endState=ongoing`，`endDate` 保持为空，不能把“截至现在”写成一个结束日期。来源行没有显式 `memberships` 时，已确认的初中、高中、大学和实业团组织也会由参赛组织生成一条 Membership 观察；没有日期时先写入空日期记录，再用已有不重叠履历推理可解释的时间窗口。Club、company、unknown、地方代表和选拔队不自动生成 Membership。DNS 不代表实际出场，但只要来源给出了已确认学校或实业团，仍进入 Membership 治理。普通职业团体/俱乐部不默认互斥；有明确业务依据时提供 exclusivityGroup=employment/team_registration。同一人物、同一组织、同一关系类型且时间和关系字段完全相同的重复 Membership 自动去重，不进入 unresolved；日期或关系字段不同的多段履历才升级复核。
 
 ### 人物显示名契约
 
@@ -107,7 +107,7 @@ node --import tsx src/governance-v2/cli.ts cleanup-checkpoints
 
 worker 通过数据库租约领取任务，赛事内严格串行。有限技术重试耗尽后任务失败、后续区组不执行；排查并 retry 后从未完成处恢复。已完成区组不再写入，提交后崩溃只补收尾。leaseToken fencing 阻止过时 worker 提交。输入文件损坏须修复持久存储里的原对象，不能绕过 hash 校验。
 
-研究每批默认 3 个重型逻辑请求，轻量/交叉/组织裁决共享独立的 5 个逻辑请求额度，重启保留额度。六类 LLM 请求最多首次加两次重试，退避 250ms/500ms；重试有独立持久化额度（逻辑额度的两倍）。暂时网络故障、超时、408/409/429/5xx、不完整响应和 JSON/schema/引用错误可重试；正常 unresolved、拒答、配置/预算不足、输入过大、400/401/403 不重试。批量响应按输入候选与证据约束并逐项检查作用域，重试附安全错误反馈。modelJournal 保存耗尽结果，恢复任务不刷新该请求额度。researchCalls 记录 attemptNo/maxAttempts/retryReason/retryExhausted；报告与邮件区分 LLM 重试和批次重试，累计全部尝试的调用与 tokens。超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置。普通缺所属、模糊 PB 不联网。归一化策略 whole-group-cross-check/8。
+研究不设置每批逻辑请求预算；所有被路由到 LLM 的 unresolved 都必须至少获得一次对应阶段的判断。六类 LLM 请求最多首次加两次重试，退避 250ms/500ms；重试按单次请求保留有限上限，不因正常 unresolved 反复调用。暂时网络故障、超时、408/409/429/5xx、不完整响应和 JSON/schema/引用错误可重试；正常 unresolved、拒答、配置、输入过大、400/401/403 不重试。批量响应按输入候选与证据约束并逐项检查作用域，重试附安全错误反馈。researchCalls 记录 attemptNo/maxAttempts/retryReason/retryExhausted；报告与邮件区分 LLM 重试和批次重试，累计全部尝试的调用与 tokens。超时由 GOVERNANCE_RESEARCH_TIMEOUT_MS 配置。普通缺所属、模糊 PB 不联网。归一化策略 whole-group-cross-check/8。
 
 严重 unresolved 或技术失败才排队批次告警，赛事所有终态排队总结；邮件中写导入条数、修复操作数、计划修复数与自然语言 unresolved。dry_run 实际修复数是 0。汇报由模板生成，不为统计调用 LLM。SMTP 失败持久重试，Message-ID 稳定，但不保证提供方端到端恰好一次。
 
@@ -157,7 +157,7 @@ organizationResearch 逐对象记录候选数、进入原因及结果，normaliz
 
 交叉校验输出的 `personKeys` 必须是当前输入的 `rows[].key`，不能是候选人物 ID 或 `gov_` 暂定人物 ID。请求的结构化输出 schema 按本批行键、组织键和证据键生成枚举；返回后再次按同一范围校验。跨组织问题拆为各组织的问题，不放宽业务校验或人工替代判断。候选集合是宽松召回，暂定来源档案、没有 catalog 匹配及 DNS 独立档案本身不构成身份矛盾。
 
-首组 apply 的交叉请求曾成功返回但耗时 112.7 秒，接近生产 120 秒限制；生产单次请求超时调整为 240 秒，现有归一化预算 5、研究预算 3 及 attempt 上限 3 保持。正式导入仍提交新的 `mode=apply` 任务，不将 dry-run 历史直接改为已写入。常驻 worker 保持禁止写入；授权的首组通过一次性 write-enabled runner 执行，结束恢复常驻 worker。
+首组 apply 的交叉请求曾成功返回但耗时 112.7 秒，接近生产 120 秒限制；生产单次请求超时调整为 240 秒。逻辑请求不因批次计数提前截断，单次请求仍受 attempt 上限 3 约束。正式导入仍提交新的 `mode=apply` 任务，不将 dry-run 历史直接改为已写入。常驻 worker 保持禁止写入；授权的首组通过一次性 write-enabled runner 执行，结束恢复常驻 worker。
 
 ### 同音姓名轻量分流（2026-11-13，策略 /8）
 

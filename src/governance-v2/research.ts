@@ -140,9 +140,11 @@ export type ResearchConfig = {
   baseUrl?: string;
   model?: string;
   timeoutMs: number;
-  maxRequests: number;
+  /** @deprecated Logical request budgets are intentionally unlimited. */
+  maxRequests?: number;
   inputCostPerMillionUsd?: number;
   outputCostPerMillionUsd?: number;
+  /** @deprecated Batch-level reservations are no longer used. */
   reserve?: (kind: ResearchRequest["kind"], retry?: boolean) => Promise<boolean>;
 };
 type ResearchResponse = {
@@ -254,20 +256,12 @@ async function readResearchResponse(response: Response, secrets: string[], obser
   }
 }
 export function createResearcher(config: ResearchConfig): Researcher {
-  let count = 0, normalizationCount = 0;
-  // 研究器是受限适配器：规则层决定何时研究，这里只执行可审计的结构化请求。
+  // 规则层决定何时研究；不再用批次级逻辑请求预算截断 unresolved。
   const once = async (request: ResearchRequest, metrics: Metrics, attemptNo: number, retryReason?: string): Promise<ResearchOutcome> => {
     if (JSON.stringify(request).length > (request.kind.startsWith("normalization_") || request.kind === "organization_adjudication" ? 512000 : 24000))
       return stop("research_scope_too_large", metrics);
     if (!config.apiKey || !config.model)
       return stop("research_not_configured", metrics);
-    const normalization = request.kind.startsWith("normalization_") || request.kind === "organization_adjudication";
-    if (
-      (attemptNo === 1 && (normalization ? normalizationCount >= 5 : count >= config.maxRequests)) ||
-      (config.reserve && !(await config.reserve(request.kind, attemptNo > 1)))
-    )
-      return stop("research_budget_exhausted", metrics);
-    if (attemptNo === 1) { if (normalization) normalizationCount++; else count++; }
     const started = Date.now(),
       beforeStops = metrics.stoppedReasons.length,
       beforeInput = metrics.inputTokens,

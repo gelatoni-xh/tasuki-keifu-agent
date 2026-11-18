@@ -394,6 +394,34 @@ export async function normalizePeople(
     const sourceOrganization = row.organizationKey
       ? input.organizations.find((o) => o.key === row.organizationKey)
       : undefined;
+    // A corporate-team affiliation does not conflict with a school history.
+    // When every competing same-name profile is therefore non-conflicting and
+    // one profile is already tied to the source team, keep the profile with
+    // the strongest stored footprint and merge the redundant profiles. This
+    // prevents ordinary university-to-company transitions from falling into
+    // expensive identity research.
+    const nonConflictingCandidates = (() => {
+      if (!orgId || sourceOrganization?.type !== "corporate_team" || candidates.length < 2)
+        return undefined;
+      const memberships = new Map(
+        candidates.map((p) => [p.id, ctx.memberships.filter((m) => m.personId === p.id)]),
+      );
+      if (!candidates.some((p) => memberships.get(p.id)?.some((m) => m.organizationId === orgId)))
+        return undefined;
+      const hasConflict = candidates.some((a, index) =>
+        candidates.slice(index + 1).some((b) =>
+          memberships.get(a.id)!.some((ma) => memberships.get(b.id)!.some((mb) => membershipConflict(ma, mb))),
+        ),
+      );
+      if (hasConflict) return undefined;
+      return [...candidates].sort((a, b) => {
+        const aResults = (ctx.historicalResults ?? []).filter((h) => h.personId === a.id).length;
+        const bResults = (ctx.historicalResults ?? []).filter((h) => h.personId === b.id).length;
+        return bResults - aResults ||
+          (memberships.get(b.id)?.length ?? 0) - (memberships.get(a.id)?.length ?? 0) ||
+          a.id.localeCompare(b.id);
+      });
+    })();
     // An unconfirmed club/federation label must not block a unique person.
     // Keep the label only on RaceResult; it cannot create Membership evidence.
     const uniqueUnconfirmedOrganizationMatch =
@@ -406,6 +434,9 @@ export async function normalizePeople(
       (!row.birthDate || !candidates[0].birthDate || row.birthDate === candidates[0].birthDate);
     let confirmedDistinct = false;
     let id =
+      (nonConflictingCandidates && !forceReview.has(row.key)
+        ? nonConflictingCandidates[0].id
+        : undefined) ??
       mapped ??
       stableMatches.get(sourceKey) ??
       historicalMatch?.person.id ??
@@ -425,6 +456,33 @@ export async function normalizePeople(
     )
       id = undefined;
     if (forceReview.has(row.key)) id = undefined;
+    if (id && nonConflictingCandidates && !forceReview.has(row.key)) {
+      out.metrics.normalizationRuleMatches!.push({
+        subjectRef: row.key,
+        targetId: id,
+        rule: "non_conflicting_corporate_team_identity_merge",
+        evidenceRefs: [`source:${row.key}`],
+        weakerCandidateIds: nonConflictingCandidates.filter((p) => p.id !== id).map((p) => p.id),
+      });
+      for (const duplicate of nonConflictingCandidates.filter((p) => p.id !== id)) {
+        out.changes.push({
+          ...change(
+            batchId,
+            `merge_person:${duplicate.id}`,
+            {
+              kind: "merge_person",
+              canonicalId: id,
+              duplicateId: duplicate.id,
+              evidence: [{ sourceKey: `source:${row.key}` }],
+            },
+            "normalization",
+            "教育阶段与实业团阶段不构成身份冲突，重复同名档案归并",
+            versions(ctx, [id, duplicate.id]),
+          ),
+          evidence: [{ sourceKey: `source:${row.key}` }],
+        });
+      }
+    }
     if (id && historicalMatch?.person.id === id && !mapped && !forceReview.has(row.key)) {
       out.metrics.normalizationRuleMatches!.push({ subjectRef: row.key, targetId: id,
         rule: "exact_name_kana_historical_organization",
@@ -696,7 +754,10 @@ export async function governMemberships(
       hints.push({
         organizationKey: implicitOrganization.key,
         type: implicitOrganization.type === "corporate_team" ? "affiliated" : "enrolled",
-        endState: "unknown",
+        // A current race establishes an observed start boundary for this
+        // affiliation; it does not establish an end date.
+        startDate: implicitOrganization.type === "corporate_team" ? ctx.raceDate : undefined,
+        endState: implicitOrganization.type === "corporate_team" ? "ongoing" : "unknown",
       });
     }
     if (hints.length) {
@@ -730,22 +791,50 @@ export async function governMemberships(
         ));
         continue;
       }
-      const existing = [...all.values()].filter(
+      let existing = [...all.values()].filter(
         (m) =>
           m.personId === personId &&
           m.organizationId === organizationId &&
           m.type === hint.type,
       );
       if (existing.length > 1) {
-        out.findings.push(
-          unresolved(
-            `membership_duplicate:${personId}:${organizationId}`,
-            personId,
-            "同一组织存在多段履历，不能仅凭组织相同折叠或覆盖；保留现有记录与来源线索。",
-            "membership_unresolved",
-          ),
+        const sameRecord = existing.every((m) =>
+          m.startDate === existing[0].startDate &&
+          m.endDate === existing[0].endDate &&
+          m.startBasis === existing[0].startBasis &&
+          m.endBasis === existing[0].endBasis &&
+          m.endState === existing[0].endState &&
+          m.exclusivityGroup === existing[0].exclusivityGroup,
         );
-        continue;
+        if (sameRecord) {
+          // Duplicate rows produced by a person merge are not a business
+          // conflict; keep the row with the strongest source/date footprint.
+          existing = [existing.sort((a, b) =>
+            Number(!!b.evidence) - Number(!!a.evidence) ||
+            Number(!!b.startDate) - Number(!!a.startDate) ||
+            a.id.localeCompare(b.id),
+          )[0]];
+          out.metrics.normalizationRuleMatches ??= [];
+          out.metrics.normalizationRuleMatches.push({
+            subjectRef: row.key,
+            targetId: existing[0].id,
+            rule: "duplicate_same_membership_deduplication",
+            evidenceRefs: [`source:${row.key}`],
+            weakerCandidateIds: [...all.values()]
+              .filter((m) => m.personId === personId && m.organizationId === organizationId && m.type === hint.type && m.id !== existing[0].id)
+              .map((m) => m.id),
+          });
+        } else {
+          out.findings.push(
+            unresolved(
+              `membership_duplicate:${personId}:${organizationId}`,
+              personId,
+              "同一组织存在日期或关系字段不同的多段履历，不能自动折叠；保留现有记录与来源线索。",
+              "membership_unresolved",
+            ),
+          );
+          continue;
+        }
       }
       let window: Window = {
         startDate: hint.startDate,

@@ -25,7 +25,7 @@ try{
  const manifest={version:'event-governance/1',requestKey:`nittai333-men5000-heat1-${mode}-v1`,eventEditionId:edition.id,mode,batches:[input]};
  await writeFile(`${root}/manifest-${mode}.json`,JSON.stringify(manifest,null,2)+'\n');
  const id=await db.submit(manifest,store);await writeFile(`${root}/task-${mode}.txt`,id+'\n');console.log('Task',id,'mode',mode);
- const runner=new EventRunner(db,store,saver,{writeEnabled:mode==='apply',research:{apiKey:env.OPENAI_API_KEY,baseUrl:env.OPENAI_BASE_URL,model:env.GOVERNANCE_RESEARCH_MODEL,timeoutMs:25000,maxRequests:3}});
+ const runner=new EventRunner(db,store,saver,{writeEnabled:mode==='apply',research:{apiKey:env.OPENAI_API_KEY,baseUrl:env.OPENAI_BASE_URL,model:env.GOVERNANCE_RESEARCH_MODEL,timeoutMs:25000}});
  const report=await runner.run(id);
  const task=(await pool.query('SELECT id,status,mode,summary,"errorMessage" FROM governance."EventImportTask" WHERE id=$1',[id])).rows[0];
  const batches=await db.batches(id);const batchIds=batches.map(b=>b.id);
