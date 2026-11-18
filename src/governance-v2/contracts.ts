@@ -343,6 +343,7 @@ export type Metrics = {
     model: string;
     category: string;
     durationMs: number;
+    webSearchCalls?: number;
     inputTokens: number;
     outputTokens: number;
     stoppedReason: string | null;

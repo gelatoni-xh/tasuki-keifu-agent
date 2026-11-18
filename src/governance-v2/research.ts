@@ -272,6 +272,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
       beforeStops = metrics.stoppedReasons.length,
       beforeInput = metrics.inputTokens,
       beforeOutput = metrics.outputTokens;
+    const beforeNetwork = metrics.networkCalls;
     metrics.llmCalls++;
     let phase = "request";
     let providerRequestId: string | undefined;
@@ -484,6 +485,7 @@ export function createResearcher(config: ResearchConfig): Researcher {
         durationMs: Date.now() - started,
         inputTokens: metrics.inputTokens - beforeInput,
         outputTokens: metrics.outputTokens - beforeOutput,
+        webSearchCalls: metrics.networkCalls - beforeNetwork,
         stoppedReason: metrics.stoppedReasons.length > beforeStops ? metrics.stoppedReasons.at(-1)! : null,
         ...(providerRequestId ? { providerRequestId } : {}),
         ...(responseId ? { responseId } : {}),
