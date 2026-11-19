@@ -6,9 +6,9 @@ import { normalizeOrganizations, normalizePeople } from "./agents.js";
 import type { Researcher, ResearchOutcome, ResearchRequest } from "./research.js";
 import { batchAnswerSchema, crossAnswerSchema } from "./research.js";
 import { buildCrossCheckInput } from "./cross-check-input.js";
-import { isDnsRow, normalizeName } from "./rules.js";
+import { normalizeName } from "./rules.js";
 
-export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/9";
+export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/10";
 // 归一化分阶段执行：先用规则缩小范围，再让模型处理少量仍不确定的候选。
 const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
 export type NormalizationState = {
@@ -20,6 +20,7 @@ export type NormalizationState = {
   crossCheckEvidenceRefs?: string[];
   pendingOrganizationKeys?: string[];
   confirmedOrganizationKeys?: string[];
+  ruleMatches?: NonNullable<Metrics["normalizationRuleMatches"]>;
 };
 export const initialNormalization = (): NormalizationState => ({
   requests: {}, decisions: {}, organizationOverrides: {}, issues: [], affectedPersonKeys: [],
@@ -171,6 +172,7 @@ export async function crossCheck(input: BatchInput, ctx: Context, state: Normali
   resolution: Resolution, research: Researcher): Promise<NormalizationState> {
   // cross-check 只发现批次内部不一致，结果还要经过 validate 和后续裁决。
   const next = clone(state), started = Date.now();
+  next.ruleMatches = clone(resolution.metrics.normalizationRuleMatches ?? []);
   if (!input.rows.length && !input.organizations.length) {
     stage(resolution.metrics, "normalization_cross_check", 0, 0, started); return next;
   }
@@ -216,8 +218,34 @@ export function validateCrossCheck(input: BatchInput, state: NormalizationState,
       issue.reason = `缺少与本问题相关的证据；${issue.reason}`;
       issue.suggestedAction = "unresolved";
     }
+    if (issue.issueType !== "organization_variant" && issue.personKeys.length &&
+        ["unresolved", "research"].includes(issue.suggestedAction)) {
+      const contradicted = issue.personKeys.some(key => {
+        const row = input.rows.find(r => r.key === key)!;
+        const targetId = next.ruleMatches?.find(match => match.subjectRef === key)?.targetId ??
+          next.decisions[`person_identity:${key}`]?.answer?.targetId;
+        if (!targetId) return false;
+        const target = ctx?.people.find(p => p.id === targetId);
+        const birthConflict = !!(row.birthDate && target?.birthDate && row.birthDate !== target.birthDate);
+        const sameRaceDuplicate = input.rows.some(other => other.key !== key &&
+          (next.ruleMatches?.some(match => match.subjectRef === other.key && match.targetId === targetId) ||
+            next.decisions[`person_identity:${other.key}`]?.answer?.targetId === targetId) &&
+          other.organizationKey === row.organizationKey);
+        const sourceOrg = input.organizations.find(o => o.key === row.organizationKey);
+        const organizationId = ctx?.organizations.find(o => sourceOrg &&
+          normalizeName(o.nameJa) === normalizeName(sourceOrg.name))?.id;
+        const sourcedTimelineConflict = !!(ctx?.raceDate && organizationId && issue.evidenceRefs.some(ref => {
+          if (!ref.startsWith("membership:")) return false;
+          const m = ctx.memberships.find(value => `membership:${value.id}` === ref);
+          return !!m && m.personId === targetId && m.organizationId === organizationId &&
+            m.endBasis === "source" && !!m.endDate && m.endDate < ctx.raceDate!;
+        }));
+        return birthConflict || sameRaceDuplicate || sourcedTimelineConflict;
+      });
+      if (!contradicted) issue.suggestedAction = "keep";
+    }
     seen.add(issue.issueKey);
-    if (["unresolved", "research"].includes(issue.suggestedAction) || issue.issueType === "circular_evidence") {
+    if (["unresolved", "research"].includes(issue.suggestedAction)) {
       for (const personKey of issue.personKeys) {
         const key = `person_identity:${personKey}`;
         if (next.requests[key]) next.decisions[key] = { ...next.decisions[key], answer: {
@@ -379,7 +407,7 @@ export async function deepResearch(state: NormalizationState, resolution: Resolu
 
 export function finalizeNormalization(input: BatchInput, state: NormalizationState, resolution: Resolution): Resolution {
   const result = clone(resolution);
-  result.metrics.normalizationDnsSkipped = input.rows.filter(row => isDnsRow(row)).map(row => row.key);
+  result.metrics.normalizationDnsSkipped = [];
   result.metrics.normalizationSummary = {
     crossCheckIssues: state.issues.length,
     organizationCorrections: Object.keys(state.organizationOverrides).length,
