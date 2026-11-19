@@ -18,7 +18,8 @@ import {
 } from "./contracts.js";
 import {
   buildPlan,
-  prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts,
+  prepareMembershipContext, deduplicateMemberships, resolveMembershipRules,
+  inferMembershipTimeline, collectMembershipConflicts,
   researchMembershipConflicts, validateMembershipDecisions, finalizeMemberships,
   type MembershipWork,
   verifyFacts,
@@ -48,7 +49,8 @@ export const graphNodeNames = [
   "prepare_cross_check", "normalization_cross_check", "validate_cross_check", "organization_adjudication",
   "organization_network_research", "affected_person_reassessment", "normalization_deep_research", "finalize_normalization",
   "govern_membership",
-  "prepare_membership_context", "membership_rules", "collect_membership_conflicts",
+  "prepare_membership_context", "membership_deduplication", "membership_rules",
+  "membership_timeline", "collect_membership_conflicts",
   "membership_deep_research", "validate_membership_decisions", "finalize_membership",
   "verify_person_facts",
   "aggregate_governance_result",
@@ -89,8 +91,14 @@ export function buildMembershipGraph(deps: {
     .addNode("prepare_membership_context", node("prepare_membership_context", s => ({
       membershipWork: prepareMembershipContext(s.input, s.context, s.resolution),
     })))
+    .addNode("membership_deduplication", node("membership_deduplication", s => ({
+      membershipWork: deduplicateMemberships(s.batchId, s.membershipWork),
+    })))
     .addNode("membership_rules", node("membership_rules", s => ({
       membershipWork: resolveMembershipRules(s.batchId, s.input, s.context, s.resolution, s.membershipWork),
+    })))
+    .addNode("membership_timeline", node("membership_timeline", s => ({
+      membershipWork: inferMembershipTimeline(s.membershipWork, s.context),
     })))
     .addNode("collect_membership_conflicts", node("collect_membership_conflicts", s => ({
       membershipWork: collectMembershipConflicts(s.membershipWork),
@@ -105,8 +113,10 @@ export function buildMembershipGraph(deps: {
       membership: finalizeMemberships(s.batchId, s.context, s.membershipWork),
     })))
     .addEdge(START, "prepare_membership_context")
-    .addEdge("prepare_membership_context", "membership_rules")
-    .addEdge("membership_rules", "collect_membership_conflicts")
+    .addEdge("prepare_membership_context", "membership_deduplication")
+    .addEdge("membership_deduplication", "membership_rules")
+    .addEdge("membership_rules", "membership_timeline")
+    .addEdge("membership_timeline", "collect_membership_conflicts")
     .addConditionalEdges("collect_membership_conflicts", s => s.membershipWork.groups.length
       ? "membership_deep_research" : "finalize_membership", ["membership_deep_research", "finalize_membership"])
     .addEdge("membership_deep_research", "validate_membership_decisions")

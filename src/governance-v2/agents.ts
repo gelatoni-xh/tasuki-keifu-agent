@@ -486,10 +486,37 @@ export async function normalizePeople(
         evidenceRefs: [`source:${row.key}`],
         weakerCandidateIds: [] });
     }
-    const currentDns = isDnsRow(row);
+    const temporary = ctx.people.find(p => p.id === mapped);
+    const formal = candidates.find(p => !p.id.startsWith("gov_") && p.id !== mapped &&
+      normalizeName(p.displayNameJa) === normalizeName(row.name) &&
+      (!row.kana || !p.displayNameKana || normalizeName(p.displayNameKana) === normalizeName(row.kana)) &&
+      (!row.birthDate || !p.birthDate || row.birthDate === p.birthDate) &&
+      !contradictoryCohort(p) && (ctx.historicalResults ?? []).some(h =>
+        h.personId === p.id && h.organizationId === orgId && h.raceId !== ctx.raceId && !!h.sourceId));
+    if (mapped?.startsWith("gov_") && temporary && formal && !forceReview.has(row.key) &&
+        normalizeName(temporary.displayNameJa) === normalizeName(formal.displayNameJa) &&
+        (!temporary.birthDate || !formal.birthDate || temporary.birthDate === formal.birthDate) &&
+        !ctx.memberships.some(m => m.personId === mapped && !!orgId && m.organizationId !== orgId)) {
+      id = formal.id;
+      if (!out.changes.some(c => c.operation.kind === "merge_person" && c.operation.duplicateId === mapped)) {
+        const evidence = [{ sourceId: input.sourceId, sourceKey },
+          ...(ctx.historicalResults ?? []).filter(h => h.personId === id && h.organizationId === orgId)
+            .map(h => ({ sourceId: h.sourceId, sourceKey: h.id }))];
+        out.changes.push({ ...change(batchId, `merge_person:${mapped}`, {
+          kind: "merge_person", canonicalId: id, duplicateId: mapped, evidence,
+        }, "normalization", "临时人物与正式人物姓名、来源及历史所属一致", versions(ctx, [id, mapped])), evidence });
+      }
+    }
+    if (id && !out.metrics.normalizationRuleMatches!.some(m => m.subjectRef === row.key) &&
+        !forceReview.has(row.key)) {
+      out.metrics.normalizationRuleMatches!.push({ subjectRef: row.key, targetId: id,
+        rule: mapped === id ? "source_mapping" : mapped ? "deterministic_merge" : "membership_or_birthdate",
+        evidenceRefs: [`source:${row.key}`],
+        weakerCandidateIds: candidates.filter(p => p.id !== id).map(p => p.id) });
+    }
     // Research requires an actual competing attribution, not a mere empty field/name variation.
     if (
-      !id && !currentDns &&
+      !id &&
       (candidates.length || forceReview.has(row.key)) &&
       (light || contextual.length > 1 ||
         !!mapped ||
@@ -613,7 +640,7 @@ export async function normalizePeople(
         ),
       );
       if (
-        candidates.length && !currentDns &&
+        candidates.length &&
         !confirmedDistinct &&
         !out.findings.some((f) => f.subjectRef === row.key)
       )
@@ -670,7 +697,7 @@ export async function normalizePeople(
       const mapping = out.changes.find(c => c.operation.kind === "source_mapping" &&
         c.operation.sourceKey === sourceKey && c.operation.targetId === id);
       if (mapping) {
-        mapping.reason += "；规则：姓名及假名一致，唯一强候选的历史报名所属一致（DNS亦可作为身份依据）";
+        mapping.reason += `；规则：${ruleMatch.rule}`;
         mapping.evidence = ruleMatch.evidenceRefs.map(sourceKey => ({ sourceKey }));
       }
     }
@@ -690,6 +717,10 @@ function membershipPersonId(key: string, name: string, ctx: Context, res: Resolu
   if (res.personMap[key]) return res.personMap[key];
   const candidates = ctx.people.filter(p => normalizeName(p.displayNameJa) === normalizeName(name));
   return candidates.length === 1 ? candidates[0].id : undefined;
+}
+function membershipIdentityBlocked(key: string, res: Resolution) {
+  return res.findings.some(f => f.subjectRef === key && f.status === "unresolved" &&
+    ["identity_unresolved", "mapping_conflict", "circular_evidence"].includes(f.code));
 }
 export function prepareMembershipContext(input: BatchInput, ctx: Context, res: Resolution): MembershipWork {
   const all = new Map(
@@ -719,20 +750,15 @@ export function prepareMembershipContext(input: BatchInput, ctx: Context, res: R
   return {
     memberships: [...all.values()],
     affectedPersonIds: [...new Set(input.rows
-      .filter(row => !res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved"))
+      .filter(row => !membershipIdentityBlocked(row.key, res))
       .map(row => membershipPersonId(row.key, row.name, ctx, res)).filter((id): id is string => !!id))],
     result: { agentKey: "membership", skipped: false, findings: [], changes: [], metrics: emptyMetrics() },
     groups: [], outcomes: [],
   };
 }
-export function resolveMembershipRules(batchId: string, input: BatchInput, ctx: Context,
-  res: Resolution, state: MembershipWork): MembershipWork {
-  const started = Date.now(), work = structuredClone(state), out = work.result;
+export function deduplicateMemberships(batchId: string, state: MembershipWork): MembershipWork {
+  const work = structuredClone(state), out = work.result;
   const all = new Map(work.memberships.map(m => [m.id, m]));
-  const orgTypes = new Map([
-    ...ctx.organizations.map(o => [o.id, o.type] as const),
-    ...input.organizations.map(o => [res.organizationMap[o.key], ctx.organizations.find(c => c.id === res.organizationMap[o.key])?.type ?? o.type] as const),
-  ]);
   const affected = new Set(work.affectedPersonIds);
   const buckets = new Map<string, Membership[]>();
   for (const m of all.values()) {
@@ -756,8 +782,20 @@ export function resolveMembershipRules(batchId: string, input: BatchInput, ctx: 
       all.delete(duplicate.id);
     }
   }
+  work.memberships = [...all.values()];
+  return work;
+}
+export function resolveMembershipRules(batchId: string, input: BatchInput, ctx: Context,
+  res: Resolution, state: MembershipWork): MembershipWork {
+  const started = Date.now(), work = structuredClone(state), out = work.result;
+  const all = new Map(work.memberships.map(m => [m.id, m]));
+  const orgTypes = new Map([
+    ...ctx.organizations.map(o => [o.id, o.type] as const),
+    ...input.organizations.map(o => [res.organizationMap[o.key], ctx.organizations.find(c => c.id === res.organizationMap[o.key])?.type ?? o.type] as const),
+  ]);
+  const affected = new Set(work.affectedPersonIds);
   for (const row of input.rows) {
-    if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
+    if (membershipIdentityBlocked(row.key, res)) continue;
     // Membership-only reruns may lack the historical source mapping created by
     // the original import. Reuse the canonical name match before deriving a
     // provisional ID; the latter is not a valid business Person reference.
@@ -886,50 +924,70 @@ export function resolveMembershipRules(batchId: string, input: BatchInput, ctx: 
       all.set(m.id, m);
     }
   }
-  // New anchors improve the involved stored memberships as well as this batch's new relation.
-  for (const m of all.values())
-    if (affected.has(m.personId)) {
-      if (
-        (!m.startDate || !m.endDate) &&
-        [...all.values()].filter(
-          (x) =>
-            x.personId === m.personId &&
-            x.type === m.type &&
-            x.organizationType === m.organizationType,
-        ).length === 1
-      ) {
-        const inferred = adjacentSchoolWindow(
-          m.organizationType,
-          [...all.values()].filter((x) => x.personId === m.personId),
-        );
-        if (inferred) Object.assign(m, fillUnknownDates(m, inferred));
-      }
-      if (!validMembershipWindow(m))
-        out.findings.push(
-          unresolved(
-            `membership_invalid:${m.id}`,
-            m.id,
-            "履历起止顺序无效，需要来源核验；不应用无效时间窗口。",
-            "membership_conflict",
-          ),
-        );
-      for (const other of all.values())
-        if (m.id < other.id && membershipConflict(m, other))
-          out.findings.push(
-            unresolved(
-              `membership_overlap:${m.id}:${other.id}`,
-              m.personId,
-              "同一学段不同学校或明确互斥关系的来源时间重叠，需要核验。",
-              "membership_conflict",
-            ),
-          );
-    }
   work.memberships = [...all.values()];
   out.metrics.durationMs += Date.now() - started;
   return work;
 }
+export function inferMembershipTimeline(state: MembershipWork, ctx: Context): MembershipWork {
+  const work = structuredClone(state), out = work.result;
+  const all = new Map(work.memberships.map(m => [m.id, m]));
+  const affected = new Set(work.affectedPersonIds);
+  // A historical starter is an observation of a relationship, not proof of its joining date.
+  for (const result of ctx.historicalResults ?? []) {
+    if (!affected.has(result.personId) || !result.isStarter || !result.raceDate || !result.organizationId) continue;
+    const org = ctx.organizations.find(o => o.id === result.organizationId);
+    if (!org || !isMembershipOrganizationType(org.type)) continue;
+    const kind = org.type === "corporate_team" ? "affiliated" : "enrolled";
+    const same = [...all.values()].filter(m => m.personId === result.personId &&
+      m.organizationId === org.id && m.type === kind);
+    if (same.length > 1) continue;
+    const m: Membership = same[0] ?? {
+      id: stableId(result.personId, org.id, kind), personId: result.personId,
+      organizationId: org.id, organizationType: org.type, type: kind,
+      startBasis: "unknown", endBasis: "unknown", endState: "unknown",
+    };
+    if (m.startDate && m.startDate > result.raceDate) {
+      m.startDate = undefined;
+      m.startYear = undefined;
+      m.startBasis = "unknown";
+    }
+    m.evidence = { ...m.evidence, historicalStarterObservations: [
+      ...new Set([...(m.evidence?.historicalStarterObservations as string[] ?? []), result.id]),
+    ].sort() };
+    all.set(m.id, m);
+  }
+  for (const m of all.values()) {
+    if (!affected.has(m.personId)) continue;
+    if (m.organizationType === "corporate_team" && !m.startDate && m.startYear === undefined) {
+      const ends = [...new Set([...all.values()].filter(x => x.personId === m.personId &&
+        ["university", "high_school"].includes(x.organizationType) && x.endDate?.endsWith("03-31") &&
+        ["source", "inferred"].includes(x.endBasis)).map(x => x.endDate!))];
+      if (ends.length === 1)
+        m.evidence = { ...m.evidence, schoolEndBeforeCorporateObservation: ends[0] };
+    }
+    if ((!m.startDate || !m.endDate) && [...all.values()].filter(x =>
+      x.personId === m.personId && x.type === m.type && x.organizationType === m.organizationType).length === 1) {
+      const inferred = adjacentSchoolWindow(m.organizationType,
+        [...all.values()].filter(x => x.personId === m.personId));
+      if (inferred) Object.assign(m, fillUnknownDates(m, inferred));
+    }
+  }
+  work.memberships = [...all.values()];
+  return work;
+}
 export function collectMembershipConflicts(state: MembershipWork): MembershipWork {
   const work = structuredClone(state);
+  const affected = new Set(work.affectedPersonIds);
+  for (const m of work.memberships) {
+    if (!affected.has(m.personId)) continue;
+    if (!validMembershipWindow(m))
+      work.result.findings.push(unresolved(`membership_invalid:${m.id}`, m.id,
+        "履历起止顺序无效，需要来源核验；不应用无效时间窗口。", "membership_conflict"));
+    for (const other of work.memberships)
+      if (m.id < other.id && membershipConflict(m, other))
+        work.result.findings.push(unresolved(`membership_overlap:${m.id}:${other.id}`, m.personId,
+          "同一学段不同学校或明确互斥关系的来源时间重叠，需要核验。", "membership_conflict"));
+  }
   const groups = new Map<string, MembershipWork["groups"][number]>();
   for (const f of work.result.findings.filter(f => f.code === "membership_conflict")) {
     const personId = work.memberships.find(m => m.id === f.subjectRef)?.personId ?? f.subjectRef;
@@ -1086,8 +1144,9 @@ export function finalizeMemberships(batchId: string, ctx: Context, state: Member
 // Compatibility entry point for membership-only callers and rule tests.
 export async function governMemberships(batchId: string, input: BatchInput, ctx: Context,
   res: Resolution, research: Researcher): Promise<AgentResult> {
-  let work = prepareMembershipContext(input, ctx, res);
-  work = collectMembershipConflicts(resolveMembershipRules(batchId, input, ctx, res, work));
+  let work = deduplicateMemberships(batchId, prepareMembershipContext(input, ctx, res));
+  work = resolveMembershipRules(batchId, input, ctx, res, work);
+  work = collectMembershipConflicts(inferMembershipTimeline(work, ctx));
   work = validateMembershipDecisions(await researchMembershipConflicts(input, ctx, res, work, research));
   return finalizeMemberships(batchId, ctx, work);
 }
@@ -1111,7 +1170,7 @@ export function verifyFacts(
     { markMillis: number; reliability: number; change: Change }
   >();
   for (const row of input.rows) {
-    if (isDnsRow(row) || res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
+    if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     if (row.hometown) {
       out.metrics.ruleDecisions++;

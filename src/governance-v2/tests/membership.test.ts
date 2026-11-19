@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
 import { batchInputSchema, emptyMetrics, type Context, type Membership, type Resolution } from "../contracts.js";
-import { governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts } from "../agents.js";
+import { governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts, verifyFacts } from "../agents.js";
 import { buildMembershipGraph } from "../graph.js";
 import { fillUnknownDates } from "../rules.js";
 import type { Researcher, ResearchAnswer } from "../research.js";
@@ -48,6 +48,42 @@ test("race observation does not invent a corporate joining date or ongoing emplo
   assert.equal(result.metrics.membershipDnsRowsIncluded, 1);
   ctx.memberships = [mem({ startDate: "2020-04-01", startBasis: "source" })];
   assert.equal((await governMemberships("b", input, ctx, res, noResearch)).findings.length, 0);
+});
+
+test("DNS row still verifies source-backed person facts", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].notes = "DNS";
+  input.rows[0].hometown = "東京";
+  const result = verifyFacts("b", input, ctx, res);
+  assert.ok(result.changes.some(c => c.operation.kind === "person_fact" && c.operation.personId === "p"));
+});
+
+test("local organization finding leaves a known membership relation actionable", async () => {
+  const { input, ctx, res } = fixture();
+  res.findings = [{ key: "local", code: "organization_variant", subjectRef: "r",
+    severity: "serious", status: "unresolved", reason: "局部组织待核实", evidence: [] }];
+  const result = await governMemberships("b", input, ctx, res, noResearch);
+  assert.ok(result.changes.some(c => c.operation.kind === "membership" && c.operation.membership.personId === "p"));
+});
+
+test("historical starter and school ending inform the timeline without research", async () => {
+  const { input, ctx, res } = fixture();
+  ctx.organizations.push({ id: "u", slug: "u", nameJa: "大学", type: "university" });
+  ctx.memberships = [mem({ id: "school", organizationId: "u", organizationType: "university",
+    type: "enrolled", startDate: "2022-04-01", startYear: 2022, startBasis: "source",
+    endDate: "2025-03-31", endYear: 2025, endBasis: "source" })];
+  ctx.historicalResults = [{ id: "old", personId: "p", organizationId: "u",
+    raceId: "old-race", raceSlug: "old", raceName: "旧大会",
+    raceDate: "2021-11-01", isStarter: true }];
+  const result = await governMemberships("b", input, ctx, res, noResearch);
+  const school = result.changes.find(c => c.operation.kind === "membership" && c.operation.membership.id === "school");
+  const team = result.changes.find(c => c.operation.kind === "membership" && c.operation.membership.organizationId === "o");
+  assert.equal(school?.operation.kind === "membership" && school.operation.membership.startDate, undefined);
+  assert.deepEqual(school?.operation.kind === "membership" &&
+    school.operation.membership.evidence?.historicalStarterObservations, ["old"]);
+  assert.equal(team?.operation.kind === "membership" && team.operation.membership.startDate, undefined);
+  assert.equal(team?.operation.kind === "membership" &&
+    team.operation.membership.evidence?.schoolEndBeforeCorporateObservation, "2025-03-31");
 });
 
 test("school and corporate stages coexist without external research; retired labels never create membership", async () => {
@@ -152,7 +188,8 @@ test("different roles and academic details are not duplicate memberships", async
 test("membership graph skips LLM nodes without conflicts, and research survives validation restart", async () => {
   const f = fixture(), visited: string[] = [];
   await buildMembershipGraph({ research: noResearch, onNode: async name => { visited.push(name); } }).invoke({ batchId: "b", input: f.input, context: f.ctx, resolution: f.res });
-  assert.deepEqual(visited, ["prepare_membership_context", "membership_rules", "collect_membership_conflicts", "finalize_membership"]);
+  assert.deepEqual(visited, ["prepare_membership_context", "membership_deduplication", "membership_rules",
+    "membership_timeline", "collect_membership_conflicts", "finalize_membership"]);
   const { input, ctx, res } = conflictFixture();
   const saver = new MemorySaver(); let calls = 0;
   const research: Researcher = async () => { calls++; return { answer: answer(), evidence }; };

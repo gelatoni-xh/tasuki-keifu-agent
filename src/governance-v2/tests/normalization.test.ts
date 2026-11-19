@@ -164,7 +164,7 @@ test("person light triage routes a single plausible transcription to research an
           samePersonPlausibility: scenario === "near_name" ? "medium" : "low", reason: "逐候选分析姓名及来源差异" })) })) }, evidence: [] };
     };
     const result = await buildBatchGraph({ loadContext: async () => ctx, research }).invoke({ batchId: "b", input: data, mode: "dry_run" });
-    assert.equal(deepCalls, ["near_name", "cross_conflict"].includes(scenario) ? 1 : 0, scenario);
+    assert.equal(deepCalls, scenario === "near_name" ? 1 : 0, scenario);
     assert.equal(crossSawAssessment, true);
     assert.equal(result.normalization.decisions["person_identity:a"].personAssessments?.length, ctx.people.length);
     assert.equal(result.resolution.metrics.personIdentityTriage?.[0].assessments.length, ctx.people.length);
@@ -434,7 +434,7 @@ test("history rule rejects missing kana, different organization IDs, future/curr
   }
 });
 
-test("cross-check can reject a historical rule match without repeating lightweight or cross-check nodes", async () => {
+test("unsupported cross-check claim preserves a historical rule match", async () => {
   const { data, ctx } = historicalFixture();
   const calls: ResearchRequest[] = [];
   const result = await buildBatchGraph({ loadContext: async () => ctx, research: async (r,m) => {
@@ -442,22 +442,58 @@ test("cross-check can reject a historical rule match without repeating lightweig
     if (r.kind === "normalization_cross_check") return { crossAnswer: { issues: [{ issueKey: "conflict", issueType: "mapping_conflict", organizationKey: "o", personKeys: ["a"], evidenceRefs: ["result:ha"], reason: "发现独立身份矛盾", suggestedAction: "unresolved" }] }, evidence: [] };
     return match(r,m);
   } }).invoke({ batchId: "b", input: data, mode: "dry_run" });
-  assert.notEqual(result.resolution.personMap.a, "pa");
-  assert.deepEqual(result.resolution.metrics.normalizationRuleMatches, []);
+  assert.equal(result.resolution.personMap.a, "pa");
+  assert.ok(result.resolution.metrics.normalizationRuleMatches?.some(m => m.subjectRef === "a"));
   assert.equal(calls.filter(r => r.kind === "normalization_cross_check").length, 1);
   assert.equal(calls.filter(r => r.kind === "normalization_light").length, 1);
 });
 
-test("current DNS bypasses identity calls but still creates source-backed membership", async () => {
+test("same-race duplicate can overturn a rule-confirmed person", async () => {
+  const data = input(), ctx = context();
+  data.rows[0].sourceKey = "first";
+  data.rows[1].sourceKey = "second";
+  ctx.sourceMappings.push(
+    { sourceId: "s", entityType: "person", sourceKey: "first", personId: "pa" },
+    { sourceId: "s", entityType: "person", sourceKey: "second", personId: "pa" },
+  );
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research: async (r, m) => {
+    if (r.kind === "normalization_cross_check") return { crossAnswer: { issues: [{
+      issueKey: "duplicate", issueType: "mapping_conflict", organizationKey: "o",
+      personKeys: ["a", "b"], evidenceRefs: ["source:a", "source:b"],
+      reason: "同场两行映射同一人物", suggestedAction: "unresolved",
+    }] }, evidence: [] };
+    return match(r, m);
+  } }).invoke({ batchId: "duplicate", input: data, mode: "dry_run" });
+  assert.ok(result.plan.findings.some(f => f.code === "mapping_conflict" && f.status === "unresolved"));
+});
+
+test("temporary person merges into a formal historical identity in the rule stage", async () => {
+  const data = input(), ctx = context();
+  data.rows = [data.rows[0]];
+  data.rows[0].sourceKey = "temporary-source";
+  ctx.people.push({ id: "gov_temporary", slug: "temporary", displayNameJa: "選手a" });
+  ctx.sourceMappings.push({ sourceId: "s", entityType: "person", sourceKey: "temporary-source",
+    personId: "gov_temporary" });
+  ctx.historicalResults![0].raceDate = "2025-11-01";
+  ctx.historicalResults![0].sourceId = "s";
+  const result = await buildBatchGraph({ loadContext: async () => ctx, research: match })
+    .invoke({ batchId: "merge", input: data, mode: "dry_run" });
+  assert.equal(result.resolution.personMap.a, "pa");
+  assert.ok(result.plan.changes.some(c => c.operation.kind === "merge_person" &&
+    c.operation.canonicalId === "pa" && c.operation.duplicateId === "gov_temporary"));
+});
+
+test("current DNS follows the same identity path and retains source-backed membership", async () => {
   const data = input(), ctx = context(), calls: ResearchRequest[] = [];
   data.rows[0].notes = "DNS";
   data.rows[0].memberships = [{ organizationKey: "o", type: "enrolled", grade: 3, endState: "unknown" }];
   const result = await buildBatchGraph({ loadContext: async () => ctx, research: async (r,m) => { calls.push(r); return match(r,m); } }).invoke({ batchId: "b", input: data, mode: "dry_run" });
-  assert.deepEqual(items(calls.find(r => r.subjectRef === "person")!).map(i => i.itemKey), ["person_identity:b"]);
-  assert.notEqual(result.resolution.personMap.a, "pa");
+  assert.deepEqual(items(calls.find(r => r.subjectRef === "person")!).map(i => i.itemKey), ["person_identity:a", "person_identity:b"]);
+  assert.equal(result.resolution.personMap.a, "pa");
   assert.equal(result.resolution.personMap.b, "pb");
   assert.equal(result.plan.changes.filter(c => c.operation.kind === "membership").length, 2);
   assert.equal(calls.filter(r => r.kind === "person_identity").length, 0);
+  assert.deepEqual(result.resolution.metrics.normalizationDnsSkipped, []);
 });
 
 test("unresolved organization suspends all dependent matches even without canonical ID correction", async () => {
