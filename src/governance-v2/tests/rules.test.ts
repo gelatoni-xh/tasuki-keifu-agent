@@ -102,7 +102,7 @@ test("PB parser refuses uncertain text and source recency cannot worsen PB", () 
   );
   assert.equal(shouldUpdatePB(1690000, 1), false);
 });
-test("manifest rejects duplicate units and withdrawn qualifier before database access", () => {
+test("manifest rejects duplicate units and accepts the reopened qualifier", () => {
   const batch = batchInputSchema.parse({
     unitType: "leg",
     unitKey: "1",
@@ -121,13 +121,11 @@ test("manifest rejects duplicate units and withdrawn qualifier before database a
     }).success,
     false,
   );
-  assert.equal(
-    batchInputSchema.safeParse({
-      ...batch,
-      raceSlug: "hakone-qualifier-103-leg-1",
-    }).success,
-    false,
-  );
+  assert.equal(batchInputSchema.safeParse({
+    ...batch,
+    raceSlug: "hakone-qualifier-103-men-half-marathon",
+    sourceId: "source-hakone-103-qualifier-official",
+  }).success, true);
 });
 const ctx: Context = {
   raceId: "race",

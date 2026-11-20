@@ -123,15 +123,6 @@ export const batchInputSchema = z
           code: "custom",
           message: `Unknown team: ${team.organizationKey}`,
         });
-    const excluded =
-      batch.raceSlug === "hakone-qualifier-103" ||
-      batch.raceSlug.startsWith("hakone-qualifier-103-") ||
-      batch.sourceId === "source-hakone-103-qualifier-official";
-    if (excluded)
-      ctx.addIssue({
-        code: "custom",
-        message: "Withdrawn Hakone 103 qualifier import is out of scope",
-      });
   });
 export const manifestSchema = z
   .object({
