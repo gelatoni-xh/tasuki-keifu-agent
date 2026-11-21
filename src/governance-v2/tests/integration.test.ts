@@ -222,7 +222,7 @@ test("dry-run stores plans and summary but writes no business rows", async () =>
     0,
   );
 });
-test("apply switch cannot silently run a write task as dry-run", async () => {
+test("disabled writes keep apply queued while dry-run remains eligible", async () => {
   const id = await db.submit(manifest(), store);
   await assert.rejects(
     new EventRunner(db, store, saver, {
@@ -232,13 +232,22 @@ test("apply switch cannot silently run a write task as dry-run", async () => {
     }).run(id),
     /WRITE_ENABLED/,
   );
-  assert.equal((await db.batches(id))[0].status, "failed");
+  assert.equal((await db.batches(id))[0].status, "queued");
   assert.equal((await db.batches(id))[1].status, "queued");
+  assert.equal((await pool.query('SELECT status FROM governance."EventImportTask" WHERE id=$1', [id])).rows[0].status, "queued");
+  assert.equal((await pool.query('SELECT count(*)::int n FROM governance."BatchAttempt"')).rows[0].n, 0);
+  const dry = await db.submit(manifest("eligible-dry", "dry_run"), store);
+  const report = await new EventRunner(db, store, saver, { writeEnabled: false, researcher: noResearch }).run();
+  assert.equal(report?.taskId, dry);
+  assert.equal(report?.status, "completed");
   assert.equal(
     (await pool.query('SELECT count(*)::int AS n FROM public."RaceResult"'))
       .rows[0].n,
     0,
   );
+  const resumed = await new EventRunner(db, store, saver, { writeEnabled: true, researcher: noResearch }).run();
+  assert.equal(resumed?.taskId, id);
+  assert.equal(resumed?.status, "completed");
 });
 test("persisted checkpoint resumes an interrupted subgraph with a new runner instance", async () => {
   const id = await db.submit(manifest(), store);

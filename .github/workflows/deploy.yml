@@ -62,6 +62,12 @@ jobs:
             mkdir -p /opt/apps/tasuki-keifu-agent
             cd /opt/apps/tasuki-keifu-agent
             test -f .env.governance
+            write_settings=$(sudo grep -Ec '^GOVERNANCE_WRITE_ENABLED=(true|false)$' .env.governance || true)
+            if [ "$write_settings" != 1 ] || [ "$(sudo grep -c '^GOVERNANCE_WRITE_ENABLED=' .env.governance || true)" != 1 ]; then
+              echo "Set exactly one GOVERNANCE_WRITE_ENABLED=true or false in .env.governance"
+              exit 1
+            fi
+            expected_write=$(sudo sed -n 's/^GOVERNANCE_WRITE_ENABLED=//p' .env.governance)
             cp docker-compose.prod.yml docker-compose.prod.yml.previous
             cp /tmp/tasuki-keifu-agent-deploy/docker-compose.prod.yml /opt/apps/tasuki-keifu-agent/docker-compose.prod.yml
             previous_image=$(sudo docker image inspect tasuki-keifu-agent:latest --format '{{.Id}}')
@@ -81,6 +87,11 @@ jobs:
               fi
               sleep 5
             done
+            actual_write=$(sudo docker exec tasuki-keifu-governance-worker printenv GOVERNANCE_WRITE_ENABLED || true)
+            if [ "$actual_write" != "$expected_write" ]; then
+              echo "Worker write setting does not match .env.governance"
+              healthy=false
+            fi
             if [ "$healthy" != true ]; then
               sudo docker compose -f docker-compose.prod.yml logs --tail=100 governance-worker || true
               cp docker-compose.prod.yml.previous docker-compose.prod.yml

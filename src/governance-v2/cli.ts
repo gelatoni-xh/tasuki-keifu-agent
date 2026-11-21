@@ -199,6 +199,8 @@ async function main() {
         inputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_INPUT_COST_PER_MILLION_USD),
         outputCostPerMillionUsd: nonNegative(process.env.GOVERNANCE_OUTPUT_COST_PER_MILLION_USD),
       });
+      if (command === "worker" && !runner.options.writeEnabled)
+        console.warn("GOVERNANCE_WRITE_ENABLED is false; apply tasks remain queued until writes are enabled");
       if (command !== "worker") {
         console.log(JSON.stringify(await runner.run(arg), null, 2));
         return;

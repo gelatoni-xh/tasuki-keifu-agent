@@ -36,7 +36,7 @@ Set these variables before running the governance CLI:
 - `GOVERNANCE_DATABASE_URL`: runtime connection to the main site database with the `governance` schema.
 - `GOVERNANCE_READ_DATABASE_URL`: read-only connection; apply mode requires a separate connection.
 - `GOVERNANCE_PAYLOAD_DIR`: absolute path for durable raw batch payloads.
-- `GOVERNANCE_WRITE_ENABLED`: off by default; enable apply writes only after reviewing the plan.
+- `GOVERNANCE_WRITE_ENABLED`: set `true` in the server’s `.env.governance` for apply writes, or `false` to pause apply tasks while allowing dry runs. Deployments preserve and verify this setting.
 - `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GOVERNANCE_RESEARCH_MODEL`: optional explicit research-model configuration. Rules still run without a model; serious questions requiring research remain unresolved.
 - `GOVERNANCE_RESEARCH_REQUESTS`, `GOVERNANCE_RESEARCH_TIMEOUT_MS`: per-batch research request budget and timeout.
 - `GOVERNANCE_MAIL_ENABLED`, `MAIL_CONFIG`: explicit mail-worker switch and SMTP/Resend configuration.

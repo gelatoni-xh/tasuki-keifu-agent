@@ -44,7 +44,13 @@ export class EventRunner {
   ) {}
   async run(taskId?: string) {
     // 只有持有数据库租约的 worker 才能推进任务；失去租约后禁止提交结果。
-    const task = await this.db.claim(taskId);
+    const task = await this.db.claim(taskId, 120, this.options.writeEnabled);
+    if (!task && taskId && !this.options.writeEnabled) {
+      const blocked = await this.db.pool.query(
+        `SELECT id FROM governance."EventImportTask" WHERE id=$1 AND mode='apply' AND status IN ('queued', 'running')`, [taskId],
+      );
+      if (blocked.rowCount) throw new Error("GOVERNANCE_WRITE_ENABLED is false; apply task remains queued until writes are enabled");
+    }
     if (!task) return null;
     let leaseError: unknown;
     const timer = setInterval(() => {
