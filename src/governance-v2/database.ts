@@ -157,13 +157,13 @@ export class GovernanceDB {
       return task.id as string;
     });
   }
-  async claim(taskId?: string, leaseSeconds = 120): Promise<Task | null> {
+  async claim(taskId?: string, leaseSeconds = 120, allowApply = true): Promise<Task | null> {
     // SKIP LOCKED 允许多个 worker 找任务，同时避免领取同一个任务。
     return this.transaction(async (c) => {
       const row = (
         await c.query(
-          'SELECT * FROM governance."EventImportTask" WHERE ($1::uuid IS NULL OR id=$1) AND (status=\'queued\' OR (status=\'running\' AND "leaseUntil"<clock_timestamp())) AND "nextRunAt"<=clock_timestamp() ORDER BY "createdAt" FOR UPDATE SKIP LOCKED LIMIT 1',
-          [taskId ?? null],
+          'SELECT * FROM governance."EventImportTask" WHERE ($1::uuid IS NULL OR id=$1) AND (status=\'queued\' OR (status=\'running\' AND "leaseUntil"<clock_timestamp())) AND "nextRunAt"<=clock_timestamp() AND ($2::boolean OR mode <> \'apply\') ORDER BY "createdAt" FOR UPDATE SKIP LOCKED LIMIT 1',
+          [taskId ?? null, allowApply],
         )
       ).rows[0];
       if (!row) return null;

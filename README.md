@@ -36,7 +36,7 @@ GOVERNANCE_MAIN_REPO=/path/to/tasuki-keifu bash scripts/test-governance-integrat
 - `GOVERNANCE_DATABASE_URL`：主站业务数据库中含 `governance` schema 的 runtime 连接。
 - `GOVERNANCE_READ_DATABASE_URL`：只读连接；apply 模式必须配置独立连接。
 - `GOVERNANCE_PAYLOAD_DIR`：持久化原始批次 payload 的绝对路径。
-- `GOVERNANCE_WRITE_ENABLED`：默认关闭；仅在已审核计划后启用 apply 写入。
+- `GOVERNANCE_WRITE_ENABLED`：在服务器 `.env.governance` 中设置 `true` 启用正式写入；设为 `false` 暂停领取 apply 任务，dry-run 仍可运行。部署会保留并校验此设置。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`GOVERNANCE_RESEARCH_MODEL`：可选的显式研究模型配置。未配置时规则流程仍可执行，需研究的严重疑难会保持 unresolved。
 - `GOVERNANCE_RESEARCH_REQUESTS`、`GOVERNANCE_RESEARCH_TIMEOUT_MS`：单批研究请求预算和超时。
 - `GOVERNANCE_MAIL_ENABLED`、`MAIL_CONFIG`：邮件 worker 的显式开关与 SMTP/Resend 配置。

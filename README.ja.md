@@ -36,7 +36,7 @@ GOVERNANCE_MAIN_REPO=/path/to/tasuki-keifu bash scripts/test-governance-integrat
 - `GOVERNANCE_DATABASE_URL`：`governance` スキーマを含むメインサイト DB の runtime 接続。
 - `GOVERNANCE_READ_DATABASE_URL`：読み取り専用接続。apply では別接続が必須です。
 - `GOVERNANCE_PAYLOAD_DIR`：バッチ原文を保存する絶対パス。
-- `GOVERNANCE_WRITE_ENABLED`：既定は無効。計画を確認した後にのみ apply 書き込みを有効にします。
+- `GOVERNANCE_WRITE_ENABLED`：サーバーの `.env.governance` で `true` にすると書き込みを有効化し、`false` にすると apply タスクを保留します。dry-run は実行でき、デプロイ時に設定を維持・検証します。
 - `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`GOVERNANCE_RESEARCH_MODEL`：任意の明示的な調査モデル設定。モデルがなくてもルール処理は動作し、調査が必要な重大事項は unresolved のまま残ります。
 - `GOVERNANCE_RESEARCH_REQUESTS`、`GOVERNANCE_RESEARCH_TIMEOUT_MS`：バッチごとの調査リクエスト上限とタイムアウト。
 - `GOVERNANCE_MAIL_ENABLED`、`MAIL_CONFIG`：メール worker の明示的な有効化と SMTP/Resend 設定。
