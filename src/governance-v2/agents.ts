@@ -1309,7 +1309,7 @@ export function buildPlan(
       throw new Error(`Team result requires a normalized organization: ${t.organizationKey}`);
     return change(
       batchId,
-      `team:${t.organizationKey}:${t.leg}`,
+      `team:${t.organizationKey}:${t.leg ?? "overall"}`,
       {
         kind: "team_result",
         organizationId: res.organizationMap[t.organizationKey],

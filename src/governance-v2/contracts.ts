@@ -71,13 +71,17 @@ export const teamSchema = z
     organizationKey: text,
     finalRank: z.number().int().positive().nullable().optional(),
     finalMark: text.optional(),
-    leg: z.number().int().positive(),
+    leg: z.number().int().positive().optional(),
     cumulativeRank: z.number().int().positive().nullable().optional(),
     cumulativeMark: text.optional(),
     gapFromLeader: text.optional(),
     notes: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((team, ctx) => {
+    if (team.leg === undefined && [team.cumulativeRank, team.cumulativeMark, team.gapFromLeader].some(value => value !== undefined))
+      ctx.addIssue({ code: "custom", message: "Cumulative snapshots require a leg" });
+  });
 export const batchInputSchema = z
   .object({
     unitType: z.enum(["leg", "heat", "group"]),
