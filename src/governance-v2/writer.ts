@@ -390,6 +390,8 @@ export class BusinessWriter {
           ],
         );
         entityId = r.rows[0].id;
+        // Qualifiers have overall team totals without ekiden legs.
+        if (t.leg === undefined) break;
         await c.query(
           'INSERT INTO public."TeamCompetitionLegSnapshot" (id,"teamCompetitionResultId",leg,"cumulativeRank","cumulativeMark","cumulativeMarkMillis","gapFromLeader","gapFromLeaderMillis",notes,"sourceId","updatedAt") VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp()) ON CONFLICT("teamCompetitionResultId",leg) DO UPDATE SET "cumulativeRank"=EXCLUDED."cumulativeRank","cumulativeMark"=EXCLUDED."cumulativeMark","cumulativeMarkMillis"=EXCLUDED."cumulativeMarkMillis","gapFromLeader"=EXCLUDED."gapFromLeader","gapFromLeaderMillis"=EXCLUDED."gapFromLeaderMillis",notes=EXCLUDED.notes,"updatedAt"=clock_timestamp()',
           [

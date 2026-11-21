@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { BusinessWriter } from "../writer.js";
+import type { GovernanceDB } from "../database.js";
+import type { PoolClient } from "pg";
 import { MemorySaver } from "@langchain/langgraph";
 import { normalizePeople, governMemberships, buildPlan } from "../agents.js";
 import { buildBatchGraph } from "../graph.js";
@@ -624,4 +627,37 @@ test("confirmed organization aliases reuse existing IDs; duplicate candidates ne
   }, evidence: [{ url: "https://example.com/history", quote: "沿革" }] }));
   assert.equal(second.changes.some(c => c.operation.kind === "merge_organization"), false);
   assert.ok(second.findings.some(f => f.code === "organization_duplicate_candidates" && f.status === "informational"));
+});
+
+
+test("qualifier team totals have no synthetic leg and reject legless cumulative snapshots", () => {
+  const data = input();
+  const raw = { ...data, teams: [{ organizationKey: "o", finalRank: 1, finalMark: "10:32:23" }] };
+  const parsed = manifestSchema.parse({ version: CONTRACT_VERSION, requestKey: "qualifier", eventEditionId: "e", mode: "apply", batches: [raw] }).batches[0];
+  const resolution = { organizationMap: { o: "o1" }, personMap: { a: "pa", b: "pb" }, findings: [], changes: [], metrics: emptyMetrics() };
+  const emptyAgent = (agentKey: string) => ({ agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics() });
+  const plan = buildPlan("batch", parsed, context(), resolution, emptyAgent("membership"), emptyAgent("person_facts"), "apply");
+  const team = plan.changes.find(c => c.operation.kind === "team_result")!;
+  assert.equal(team.operation.kind === "team_result" && team.operation.team.leg, undefined);
+  assert.match(team.key, /overall/);
+  assert.throws(() => manifestSchema.parse({ version: CONTRACT_VERSION, requestKey: "bad", eventEditionId: "e", batches: [{ ...raw, teams: [{ ...raw.teams[0], cumulativeMark: "10:32:23" }] }] }), /require a leg/);
+});
+
+
+test("team writer stores qualifier totals without snapshots and preserves ekiden snapshots", async () => {
+  for (const leg of [undefined, 1]) {
+    const data = input();
+    data.teams = [{ organizationKey: "o", finalRank: 1, finalMark: "10:32:23", ...(leg ? { leg, cumulativeMark: "1:00:00" } : {}) }];
+    const resolution = { organizationMap: { o: "o1" }, personMap: { a: "pa", b: "pb" }, findings: [], changes: [], metrics: emptyMetrics() };
+    const emptyAgent = (agentKey: string) => ({ agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics() });
+    const plan = buildPlan("batch", data, context(), resolution, emptyAgent("membership"), emptyAgent("person_facts"), "apply");
+    const team = plan.changes.find(c => c.operation.kind === "team_result")!;
+    const queries: string[] = [];
+    const client = { query: async (sql: string) => { queries.push(sql); return { rows: [{ id: "team-id" }] }; } } as unknown as PoolClient;
+    const writer = new BusinessWriter({} as GovernanceDB, true);
+    await writer["execute"](client, plan, team);
+    assert.equal(queries.filter(sql => sql.startsWith('INSERT INTO public."TeamCompetitionResult"')).length, 1);
+    assert.equal(queries.filter(sql => sql.startsWith('INSERT INTO public."TeamCompetitionLegSnapshot"')).length, leg ? 1 : 0);
+    assert.equal(queries.filter(sql => sql.startsWith('INSERT INTO public."AuditLog"')).length, 1);
+  }
 });
