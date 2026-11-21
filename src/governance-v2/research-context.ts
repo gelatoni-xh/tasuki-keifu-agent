@@ -82,19 +82,16 @@ export function withBusinessResearchContext(
         };
     }
     if (answer.verdict === "merge" && answer.targetId) {
-      const canonicalRaces = new Set(
-        results
-          .filter((r) => r.entityId === answer.targetId)
-          .map((r) => r.raceId),
-      );
-      if (
-        person &&
-        results.some(
-          (r) =>
-            answer.duplicateIds.includes(r.entityId) &&
-            canonicalRaces.has(r.raceId),
-        )
-      )
+      const mergeIds = new Set([answer.targetId, ...answer.duplicateIds]);
+      const raceOwners = new Map<string, string>();
+      const collision = results.some((r) => {
+        if (!mergeIds.has(r.entityId)) return false;
+        const owner = raceOwners.get(r.raceId);
+        if (owner && owner !== r.entityId) return true;
+        raceOwners.set(r.raceId, r.entityId);
+        return false;
+      });
+      if (person && collision)
         return {
           stopReason: "merge_requires_resolving_overlapping_results",
           evidence: result.evidence,

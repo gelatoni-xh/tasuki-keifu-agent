@@ -10,7 +10,7 @@ import { normalizeName } from "./rules.js";
 
 export const NORMALIZATION_POLICY_VERSION = "whole-group-cross-check/10";
 // 归一化分阶段执行：先用规则缩小范围，再让模型处理少量仍不确定的候选。
-const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
+const PERSON_TRIAGE_QUESTION = "人物候选逐个分流，personAssessments必须覆盖每个allowedId一次，给出nameRelation、samePersonPlausibility(low/medium/high)和可解释reason；等级是调查优先级而非统计概率。同读音在日本常见，只是召回线索；同汉字同读音需重点核对身份，不能只凭姓名确认。同读音但汉字差异大且无其他同人线索，可以低可能性排除；只差一个同音字、相近字或可能OCR/导入误录（如吉田悠騎/吉田悠基），需解释具体差异，不能仅凭大众姓氏或匹配字数确认同人。结合所属时间、生日、来源和履历评估，所属不同本身不能排除转校。同名同读音、同校且学年和时间线相容的独立赛事记录可综合支持同人，无需强制生日或注册号；须排除明确矛盾和有竞争力的同名候选，缺少足够证据仍保留unresolved，较晚的赛事也可作线索，不得倒推没有依据的学年。同人证据充分才match；所有候选均可解释排除才distinct；存在中高可能性候选但不足以确认时unresolved，交重型调查。低可能性但仍缺排除依据可unresolved，不必为了确定而联网。不得虚构OCR原图、学年或外部证据。";
 export type NormalizationState = {
   requests: Record<string, ResearchRequest>;
   decisions: Record<string, ResearchOutcome>;
