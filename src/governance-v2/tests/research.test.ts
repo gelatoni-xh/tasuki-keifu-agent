@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createResearcher } from "../research.js";
 import { emptyMetrics } from "../contracts.js";
+import { withBusinessResearchContext } from "../research-context.js";
+import type { GovernanceDB } from "../database.js";
 
 const request = {
   kind: "person_identity" as const,
@@ -19,6 +21,62 @@ const answer = {
   corrections: [],
   split: null,
 };
+test("identity merge checks race collisions between every pair of profiles", async () => {
+  let collision = true;
+  const db = { readPool: { query: async (sql: string) => ({ rows: sql.includes('"RaceResult"') ? [
+    { id: "r1", entityId: "q", raceId: "race" },
+    { id: "r2", entityId: "s", raceId: collision ? "race" : "other" },
+  ] : [] }) } } as unknown as GovernanceDB;
+  const research = withBusinessResearchContext(db, async () => ({
+    answer: { ...answer, verdict: "merge", targetId: "p", duplicateIds: ["q", "s"] } as const,
+    evidence: [{ sourceId: "s", url: "https://example.org/official" }],
+  }));
+  const input = { ...request, allowedIds: ["p", "q", "s"] };
+  assert.equal((await research(input, emptyMetrics())).stopReason, "merge_requires_resolving_overlapping_results");
+  collision = false;
+  assert.equal((await research(input, emptyMetrics())).answer?.verdict, "merge");
+});
+test("person merge requires explicit valid targets and retries an incomplete decision", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  const invalid = [
+    { targetId: null, duplicateIds: ["q"] },
+    { targetId: "p", duplicateIds: [] },
+    { targetId: "p", duplicateIds: ["p"] },
+    { targetId: "p", duplicateIds: ["q", "q"] },
+  ];
+  try {
+    for (const bad of invalid) {
+      calls = 0;
+      globalThis.fetch = async (_url, init) => {
+        calls++;
+        const body = JSON.parse(String(init?.body));
+        assert.match(body.instructions, /merge 的 targetId 是保留的已有候选/);
+        if (calls > 1) assert.match(body.input[0].content[0].text, /person_decision_invalid/);
+        const result = { ...answer, verdict: "merge", ...(calls === 1 ? bad : { targetId: "p", duplicateIds: ["q"] }) };
+        return new Response(JSON.stringify({ output: [{ type: "web_search_call", action: { sources: [{ url: answer.evidence[0].url }] } },
+          { type: "message", content: [{ type: "output_text", text: JSON.stringify(result) }] }] }));
+      };
+      const metrics = emptyMetrics();
+      const result = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 3, timeoutMs: 1000 })({ ...request, allowedIds: ["p", "q"] }, metrics);
+      assert.equal(calls, 2);
+      assert.equal(result.answer?.targetId, "p");
+      assert.deepEqual(result.answer?.duplicateIds, ["q"]);
+      assert.equal(metrics.researchCalls?.[0].diagnostic?.code, "person_decision_invalid");
+    }
+    calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      const result = { ...answer, verdict: "merge", targetId: null, duplicateIds: ["q"] };
+      return new Response(JSON.stringify({ output: [{ type: "web_search_call", action: { sources: [{ url: answer.evidence[0].url }] } },
+        { type: "message", content: [{ type: "output_text", text: JSON.stringify(result) }] }] }));
+    };
+    const exhausted = await createResearcher({ apiKey: "test", model: "mock", maxRequests: 3, timeoutMs: 1000 })({ ...request, allowedIds: ["p", "q"] }, emptyMetrics());
+    assert.equal(calls, 3);
+    assert.equal(exhausted.answer, undefined);
+    assert.equal(exhausted.retryExhausted, true);
+  } finally { globalThis.fetch = original; }
+});
 test("cross-check wire schema permits source row keys and rejects person entity IDs", async () => {
   const original = globalThis.fetch;
   let personKey = "1765";

@@ -541,7 +541,7 @@ export async function normalizePeople(
           kind: "person_identity",
           subjectRef: row.key,
           question:
-            "来源身份与存量履历存在竞争归属，确认同人或不同人；不要仅凭同名合并。",
+            "来源身份与存量履历存在竞争归属，确认同人或不同人；不要仅凭同名合并。同名同读音、同校且学年和时间线相容的独立赛事记录可综合支持同人，不必强制生日或注册号；须排除明确矛盾和有竞争力的同名候选，证据不足则unresolved。较晚赛事也可作线索，不得虚构学年。",
           context: {
             row,
             affiliation: { source: input.organizations.find(o => o.key === row.organizationKey),
