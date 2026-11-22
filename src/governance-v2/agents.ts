@@ -1167,7 +1167,7 @@ export function verifyFacts(
     };
   const chosen = new Map<
     string,
-    { markMillis: number; reliability: number; change: Change }
+    { mark: string; markMillis: number; reliability: number; change: Change }
   >();
   for (const row of input.rows) {
     if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
@@ -1184,7 +1184,14 @@ export function verifyFacts(
           (p) =>
             canonicalEntity(res, p.id, "person") === personId && p[field],
         )?.[field];
-      if (!old && ctx.source.reliability >= 3)
+      if (old && normalizeName(old) !== normalizeName(value)) {
+        out.findings.push(unresolved(
+          `person_fact_conflict:${field}:${personId}:${row.key}`,
+          row.key,
+          `${field === "hometown" ? "出身地" : "登录陆协"}已有值“${old}”与本次来源值“${value}”不同，个人事实 Graph 不自动覆盖。`,
+          "person_fact_conflict",
+        ));
+      } else if (!old && ctx.source.reliability >= 3) {
         out.changes.push(
           change(
             batchId,
@@ -1200,6 +1207,14 @@ export function verifyFacts(
             versions(ctx, [personId]),
           ),
         );
+      } else if (!old) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:${field}:${personId}:${row.key}`,
+          row.key,
+          `来源可靠度为 ${ctx.source.reliability}，不足以补入${field === "hometown" ? "出身地" : "登录陆协"}“${value}”。`,
+          "insufficient_evidence",
+        ));
+      }
     }
     for (const pb of row.pbs) {
       out.metrics.ruleDecisions++;
@@ -1222,7 +1237,24 @@ export function verifyFacts(
         source = ctx.sources.find(
           (s) => s.id === (pb.sourceId ?? input.sourceId),
         );
-      if (!source) continue;
+      if (!source) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:pb:${personId}:${pb.discipline}:${row.key}`,
+          row.key,
+          `项目 ${pb.discipline} 的成绩“${pb.mark}”缺少可核验来源，无法比较或更新 PB。`,
+          "insufficient_evidence",
+        ));
+        continue;
+      }
+      if (mark === null) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:pb:${personId}:${pb.discipline}:${row.key}`,
+          row.key,
+          `项目 ${pb.discipline} 的成绩“${pb.mark}”无法解析，无法比较或更新 PB。`,
+          "insufficient_evidence",
+        ));
+        continue;
+      }
       const key = `pb:${personId}:${pb.discipline}`,
         existing =
           chosen.get(key) ??
@@ -1235,8 +1267,37 @@ export function verifyFacts(
             .sort(
               (a, b) => (a.markMillis ?? Infinity) - (b.markMillis ?? Infinity),
             )[0];
+      if (existing && existing.markMillis === null) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:${key}:${row.key}`,
+          row.key,
+          `现有 ${pb.discipline} PB“${existing.mark}”无法解析，不能确认新成绩“${pb.mark}”是否更好。`,
+          "insufficient_evidence",
+        ));
+        continue;
+      }
+      if (existing && mark >= existing.markMillis!) continue;
+      if (source.reliability < 3) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:${key}:${row.key}`,
+          row.key,
+          `项目 ${pb.discipline} 的成绩“${pb.mark}”来源可靠度为 ${source.reliability}，不足以新增或更新 PB。`,
+          "insufficient_evidence",
+        ));
+        continue;
+      }
+      if (existing && mark < existing.markMillis! && source.reliability < existing.reliability) {
+        out.findings.push(unresolved(
+          `person_fact_evidence:${key}:${row.key}`,
+          row.key,
+          `新 ${pb.discipline} 成绩“${pb.mark}”优于现有“${existing.mark}”，但来源可靠度 ${source.reliability} 低于现有来源 ${existing.reliability}，暂不覆盖。`,
+          "insufficient_evidence",
+        ));
+        continue;
+      }
       if (shouldUpdatePB(mark, source.reliability, existing))
         chosen.set(key, {
+          mark: pb.mark,
           markMillis: mark!,
           reliability: source.reliability,
           change: change(
@@ -1258,7 +1319,7 @@ export function verifyFacts(
     }
   }
   out.changes.push(...[...chosen.values()].map((v) => v.change));
-  out.skipped = !out.changes.length;
+  out.skipped = !out.changes.length && !out.findings.length;
   out.metrics.durationMs = Date.now() - started;
   return out;
 }

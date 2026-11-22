@@ -196,7 +196,7 @@ test("college race grade must not be applied to the athlete's high school", asyn
   );
   assert.equal(result.metrics.llmCalls, 0);
 });
-test("ordinary empty or uncertain facts never invoke research or create a problem", () => {
+test("an unparseable supplied PB is unresolved without invoking research", () => {
   const input = batchInputSchema.parse({
     unitType: "leg",
     unitKey: "1",
@@ -214,7 +214,9 @@ test("ordinary empty or uncertain facts never invoke research or create a proble
   });
   const facts = verifyFacts("b", input, ctx, res);
   assert.equal(facts.changes.length, 0);
-  assert.equal(facts.findings.length, 0);
+  assert.equal(facts.findings.length, 1);
+  assert.equal(facts.findings[0].code, "insufficient_evidence");
+  assert.equal(facts.findings[0].status, "unresolved");
   assert.equal(facts.metrics.llmCalls, 0);
 });
 

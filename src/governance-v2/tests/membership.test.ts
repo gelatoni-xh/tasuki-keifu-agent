@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
 import { batchInputSchema, emptyMetrics, type Context, type Membership, type Resolution } from "../contracts.js";
-import { governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts, verifyFacts } from "../agents.js";
+import { buildPersonFactsOnlyPlan, governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts, verifyFacts } from "../agents.js";
 import { buildMembershipGraph } from "../graph.js";
 import { fillUnknownDates } from "../rules.js";
 import type { Researcher, ResearchAnswer } from "../research.js";
@@ -65,6 +65,54 @@ test("hometown and registered prefecture are independent facts", () => {
   const result = verifyFacts("b", input, ctx, res);
   const facts = result.changes.filter(c => c.operation.kind === "person_fact");
   assert.deepEqual(facts.map(c => c.operation.kind === "person_fact" && c.operation.field).sort(), ["hometown", "registeredPrefecture"]);
+});
+
+test("conflicting existing person facts are unresolved and never overwritten", () => {
+  const { input, ctx, res } = fixture();
+  ctx.people[0].hometown = "東京";
+  ctx.people[0].registeredPrefecture = "長野";
+  input.rows[0].hometown = "大阪";
+  input.rows[0].registeredPrefecture = "新潟";
+
+  const result = verifyFacts("b", input, ctx, res);
+
+  assert.equal(result.findings.length, 2);
+  assert.ok(result.findings.every(f => f.status === "unresolved" && f.code === "person_fact_conflict"));
+  assert.equal(result.changes.some(c => c.operation.kind === "person_fact"), false);
+});
+
+test("low-reliability person facts are unresolved instead of silently skipped", () => {
+  const { input, ctx, res } = fixture();
+  ctx.source.reliability = 2;
+  input.rows[0].hometown = "東京";
+  input.rows[0].registeredPrefecture = "長野";
+
+  const result = verifyFacts("b", input, ctx, res);
+
+  assert.equal(result.findings.length, 2);
+  assert.ok(result.findings.every(f => f.status === "unresolved" && f.code === "insufficient_evidence"));
+  assert.equal(result.changes.length, 0);
+  const plan = buildPersonFactsOnlyPlan("b", input, ctx, res, "dry_run", result);
+  assert.equal(plan.findings.length, 2);
+  assert.equal(plan.summary.unresolved, 2);
+});
+
+test("unreliable or incomparable PB candidates are unresolved; slower marks are routine skips", () => {
+  const { input, ctx, res } = fixture();
+  ctx.sources = [{ id: "s", reliability: 4 }];
+  ctx.pbs = [{ id: "pb", personId: "p", discipline: "m10000", mark: "28:00", markMillis: 1_680_000, reliability: 5, updatedAt: "2025-01-01" }];
+  input.rows[0].pbs = [{ discipline: "m10000", mark: "27:00", sourceId: "s" }];
+
+  const blockedUpdate = verifyFacts("b", input, ctx, res);
+  assert.equal(blockedUpdate.findings.length, 1);
+  assert.equal(blockedUpdate.findings[0].code, "insufficient_evidence");
+  assert.equal(blockedUpdate.changes.length, 0);
+
+  ctx.sources[0].reliability = 2;
+  input.rows[0].pbs[0].mark = "29:00";
+  const slowerMark = verifyFacts("b", input, ctx, res);
+  assert.equal(slowerMark.findings.length, 0);
+  assert.equal(slowerMark.changes.length, 0);
 });
 
 test("local organization finding leaves a known membership relation actionable", async () => {
