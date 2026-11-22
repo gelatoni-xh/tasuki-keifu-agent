@@ -2,7 +2,7 @@ import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { journalResearch } from "./research-journal.js";
 import { NORMALIZATION_POLICY_VERSION } from "./normalization.js";
 import { withBusinessResearchContext } from "./research-context.js";
-import { buildBatchGraph, buildMembershipGraph, type BatchGraphState } from "./graph.js";
+import { buildBatchGraph, buildMembershipGraph, buildPersonFactsGraph, type BatchGraphState } from "./graph.js";
 import {
   GovernanceDB,
   LeaseLostError,
@@ -18,7 +18,7 @@ import {
 import { emptyMetrics, type Plan, type Resolution } from "./contracts.js";
 import type { PayloadStore } from "./storage.js";
 import { BusinessWriter } from "./writer.js";
-import { buildMembershipOnlyPlan, buildPlan } from "./agents.js";
+import { buildMembershipOnlyPlan, buildPersonFactsOnlyPlan, buildPlan } from "./agents.js";
 import { normalizeName, normalizeOrganizationName } from "./rules.js";
 import { enqueueReport, needsAttention, type Report } from "./notifications.js";
 import type { GovernanceTracer } from "./tracing.js";
@@ -169,7 +169,10 @@ export class EventRunner {
         },
       };
       const graph = task.inputManifest.agentMode === "membership_only"
-        ? buildMembershipGraph(graphDeps) : buildBatchGraph(graphDeps);
+        ? buildMembershipGraph(graphDeps)
+        : task.inputManifest.agentMode === "person_facts_only"
+          ? buildPersonFactsGraph(graphDeps)
+          : buildBatchGraph(graphDeps);
       const config = {
         configurable: { thread_id: attempt.graphThreadId },
         metadata: { taskId: task.id, batchId: batch.id, attemptId: attempt.id },
@@ -217,6 +220,20 @@ export class EventRunner {
             batchId: batch.id, input: membershipInput, context, resolution, mode: task.mode,
           }, config);
           plan = await buildMembershipOnlyPlan(batch.id, result.input, result.context, result.resolution, task.mode, research, result.membership);
+        } else if (task.inputManifest.agentMode === "person_facts_only") {
+          const context = await this.db.loadContext(task, input);
+          const personMap = Object.fromEntries(input.rows.map(row => {
+            const sourceKey = row.sourceKey ?? `${input.raceSlug}:${row.key}`;
+            const mapped = context.sourceMappings.find(m => m.entityType === "person" && m.sourceKey === sourceKey)?.personId;
+            return [row.key, mapped];
+          }).filter(([, id]) => !!id) as Array<[string, string]>);
+          const missing = input.rows.filter(row => !personMap[row.key]);
+          if (missing.length) throw new Error(`person_facts_only requires existing source mappings: ${missing.map(r => r.key).join(", ")}`);
+          const resolution: Resolution = { organizationMap: {}, personMap, findings: [], changes: [], metrics: emptyMetrics() };
+          const result = await graph.invoke(snapshot.values?.facts ? null : {
+            batchId: batch.id, input, context, resolution, mode: task.mode,
+          }, config);
+          plan = buildPersonFactsOnlyPlan(batch.id, input, context, resolution, task.mode, result.facts);
         } else {
           const result = await graph.invoke(
             snapshot.values?.batchId ? null : { batchId: batch.id, input, mode: task.mode },

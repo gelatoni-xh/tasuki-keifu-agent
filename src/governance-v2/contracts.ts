@@ -51,7 +51,9 @@ export const rowSchema = z
     birthDate: z.iso.date().optional(),
     organizationKey: text.optional(),
     memberships: z.array(membershipHintSchema).default([]),
+    // hometown 与 registeredPrefecture 是两个独立事实，禁止互相推断。
     hometown: text.optional(),
+    registeredPrefecture: text.optional(),
     pbs: z
       .array(
         z
@@ -134,7 +136,8 @@ export const manifestSchema = z
     requestKey: text,
     eventEditionId: text,
     mode: z.enum(["dry_run", "apply"]).default("dry_run"),
-    agentMode: z.enum(["full", "membership_only"]).default("full"),
+    // 主体已存在时可只跑某个治理子图；person_facts_only 要求 sourceKey 已有映射。
+    agentMode: z.enum(["full", "membership_only", "person_facts_only"]).default("full"),
     batches: z.array(batchInputSchema).min(1),
   })
   .strict()
@@ -196,6 +199,7 @@ export type Person = {
   displayNameKana?: string | null;
   birthDate?: string | null;
   hometown?: string | null;
+  registeredPrefecture?: string | null;
   updatedAt?: string;
   aliases?: string[];
 };
@@ -266,7 +270,7 @@ export type Operation =
     }
   | { kind: "membership"; membership: Membership }
   | { kind: "delete_membership"; membershipId: string; personId: string; organizationId: string; retainedId: string }
-  | { kind: "person_fact"; personId: string; field: "hometown"; value: string }
+  | { kind: "person_fact"; personId: string; field: "hometown" | "registeredPrefecture"; value: string }
   | {
       kind: "personal_best";
       personId: string;

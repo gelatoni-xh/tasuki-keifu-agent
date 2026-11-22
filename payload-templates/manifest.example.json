@@ -1,0 +1,28 @@
+{
+  "version": "event-governance/1",
+  "requestKey": "example-2026-11-23",
+  "eventEditionId": "edition-example",
+  "mode": "dry_run",
+  "agentMode": "full",
+  "batches": [{
+    "unitType": "group", "unitKey": "example-group", "sequence": 1,
+    "sourceId": "example-source", "raceSlug": "example-race",
+    "sourcePayload": {"template": true, "note": "原始材料示例"},
+    "organizations": [
+      {"key": "org-university", "name": "例示大学", "type": "university"},
+      {"key": "org-high-school", "name": "例示高校", "type": "high_school"},
+      {"key": "org-junior-high", "name": "例示中学校", "type": "junior_high_school"}
+    ],
+    "rows": [{
+      "key": "athlete-001", "sourceKey": "example:athlete-001", "name": "例示太郎",
+      "memberships": [
+        {"organizationKey": "org-university", "type": "origin", "startYear": 2020},
+        {"organizationKey": "org-high-school", "type": "origin", "startYear": 2017},
+        {"organizationKey": "org-junior-high", "type": "origin", "startYear": 2014}
+      ],
+      "hometown": "東京都", "registeredPrefecture": "長野県",
+      "pbs": [{"discipline": "m5000", "mark": "14:59.99", "sourceId": "example-source"}]
+    }],
+    "teams": []
+  }]
+}
