@@ -1173,6 +1173,7 @@ export function verifyFacts(
     if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
     for (const [field, value] of ([
+      ["birthDate", row.birthDate],
       ["hometown", row.hometown],
       ["registeredPrefecture", row.registeredPrefecture],
     ] as const)) {
@@ -1185,10 +1186,11 @@ export function verifyFacts(
             canonicalEntity(res, p.id, "person") === personId && p[field],
         )?.[field];
       if (old && normalizeName(old) !== normalizeName(value)) {
+        const label = field === "birthDate" ? "出生日期" : field === "hometown" ? "出身地" : "登录陆协";
         out.findings.push(unresolved(
           `person_fact_conflict:${field}:${personId}:${row.key}`,
           row.key,
-          `${field === "hometown" ? "出身地" : "登录陆协"}已有值“${old}”与本次来源值“${value}”不同，个人事实 Graph 不自动覆盖。`,
+          `${label}已有值“${old}”与本次来源值“${value}”不同，个人事实 Graph 不自动覆盖。`,
           "person_fact_conflict",
         ));
       } else if (!old && ctx.source.reliability >= 3) {
@@ -1203,15 +1205,16 @@ export function verifyFacts(
               value,
             },
             "person_facts",
-            field === "hometown" ? "可靠来源补空出身地" : "可靠来源补空登录陆协",
+            field === "birthDate" ? "可靠来源补空出生日期" : field === "hometown" ? "可靠来源补空出身地" : "可靠来源补空登录陆协",
             versions(ctx, [personId]),
           ),
         );
       } else if (!old) {
+        const label = field === "birthDate" ? "出生日期" : field === "hometown" ? "出身地" : "登录陆协";
         out.findings.push(unresolved(
           `person_fact_evidence:${field}:${personId}:${row.key}`,
           row.key,
-          `来源可靠度为 ${ctx.source.reliability}，不足以补入${field === "hometown" ? "出身地" : "登录陆协"}“${value}”。`,
+          `来源可靠度为 ${ctx.source.reliability}，不足以补入${label}“${value}”。`,
           "insufficient_evidence",
         ));
       }
@@ -1487,19 +1490,21 @@ export function buildPersonFactsOnlyPlan(
   res: Resolution,
   mode: Manifest["mode"],
   result: AgentResult,
+  identityFindings: Finding[] = [],
 ): Plan {
+  const findings = [...identityFindings, ...result.findings];
   const skipped = (agentKey: string): AgentResult => ({
     agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics(),
   });
   return {
     batchId, raceId: ctx.raceId, sourceId: input.sourceId, editionId: ctx.editionId,
-    mode, changes: result.changes, findings: result.findings,
+    mode, changes: result.changes, findings,
     agents: [skipped("normalization"), skipped("membership"), result],
     summary: {
       mode, agentMode: "person_facts_only", importedRows: 0, plannedRows: 0,
       changes: result.changes.length, repairs: mode === "apply" ? result.changes.length : 0,
       plannedRepairs: result.changes.length,
-      unresolved: result.findings.filter(f => f.status === "unresolved").length,
+      unresolved: findings.filter(f => f.status === "unresolved").length,
       metrics: [{ agentKey: "person_facts", ...result.metrics }],
     },
   };

@@ -3,7 +3,7 @@ import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
 import { batchInputSchema, emptyMetrics, type Context, type Membership, type Resolution } from "../contracts.js";
 import { buildPersonFactsOnlyPlan, governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts, verifyFacts } from "../agents.js";
-import { buildMembershipGraph } from "../graph.js";
+import { buildMembershipGraph, route_person_facts_agent } from "../graph.js";
 import { fillUnknownDates } from "../rules.js";
 import type { Researcher, ResearchAnswer } from "../research.js";
 
@@ -65,6 +65,51 @@ test("hometown and registered prefecture are independent facts", () => {
   const result = verifyFacts("b", input, ctx, res);
   const facts = result.changes.filter(c => c.operation.kind === "person_fact");
   assert.deepEqual(facts.map(c => c.operation.kind === "person_fact" && c.operation.field).sort(), ["hometown", "registeredPrefecture"]);
+});
+
+test("birth date is added when missing and an existing mismatch stays unresolved", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].birthDate = "2004-12-07";
+  const filled = verifyFacts("b", input, ctx, res);
+  const birthChange = filled.changes.find(c => c.operation.kind === "person_fact" && c.operation.field === "birthDate");
+  assert.ok(birthChange);
+  if (birthChange?.operation.kind === "person_fact") {
+    assert.equal(birthChange.operation.value, "2004-12-07");
+    assert.equal(birthChange.reason, "可靠来源补空出生日期");
+  }
+
+  ctx.people[0].birthDate = "2004-12-08";
+  const conflict = verifyFacts("b", input, ctx, res);
+  assert.ok(conflict.findings.some(f => f.code === "person_fact_conflict" && f.reason.includes("出生日期")));
+  assert.equal(conflict.changes.some(c => c.operation.kind === "person_fact" && c.operation.field === "birthDate"), false);
+});
+
+test("birth date from a low-reliability source remains unresolved", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].birthDate = "2004-12-07";
+  ctx.source.reliability = 2;
+  const result = verifyFacts("b", input, ctx, res);
+  assert.ok(result.findings.some(f => f.code === "insufficient_evidence" && f.reason.includes("出生日期")));
+  assert.equal(result.changes.some(c => c.operation.kind === "person_fact" && c.operation.field === "birthDate"), false);
+});
+
+test("birth-date-only input routes to the person facts graph", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].birthDate = "2004-12-07";
+  assert.equal(route_person_facts_agent({ input, context: ctx, resolution: res } as never), "verify_person_facts");
+});
+
+test("person facts plan retains identity unresolved findings", () => {
+  const { input, ctx, res } = fixture();
+  const facts = verifyFacts("b", input, ctx, res);
+  const identityFinding = {
+    key: "person_facts_identity:r", code: "identity_unresolved", subjectRef: "r",
+    severity: "serious" as const, status: "unresolved" as const,
+    reason: "缺少唯一映射", evidence: [{ sourceId: "s", sourceKey: "r" }],
+  };
+  const plan = buildPersonFactsOnlyPlan("b", input, ctx, res, "dry_run", facts, [identityFinding]);
+  assert.deepEqual(plan.findings, [identityFinding]);
+  assert.equal(plan.summary.unresolved, 1);
 });
 
 test("conflicting existing person facts are unresolved and never overwritten", () => {

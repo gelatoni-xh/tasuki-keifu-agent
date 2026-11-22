@@ -72,7 +72,7 @@ export function route_membership_agent(
 export function route_person_facts_agent(
   s: BatchGraphState,
 ): "verify_person_facts" | "aggregate_governance_result" {
-  return s.input.rows.some((r) => r.hometown || r.registeredPrefecture || r.pbs.length)
+  return s.input.rows.some((r) => r.birthDate || r.hometown || r.registeredPrefecture || r.pbs.length)
     ? "verify_person_facts"
     : "aggregate_governance_result";
 }
