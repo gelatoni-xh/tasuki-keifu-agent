@@ -171,7 +171,7 @@ export class EventRunner {
       const graph = task.inputManifest.agentMode === "membership_only"
         ? buildMembershipGraph(graphDeps)
         : task.inputManifest.agentMode === "person_facts_only"
-          ? buildPersonFactsGraph(graphDeps)
+          ? buildPersonFactsGraph({ ...graphDeps, checkpointer: this.saver })
           : buildBatchGraph(graphDeps);
       const config = {
         configurable: { thread_id: attempt.graphThreadId },

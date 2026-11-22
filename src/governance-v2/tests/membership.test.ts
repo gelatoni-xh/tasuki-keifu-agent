@@ -3,7 +3,7 @@ import test from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
 import { batchInputSchema, emptyMetrics, type Context, type Membership, type Resolution } from "../contracts.js";
 import { buildPersonFactsOnlyPlan, governMemberships, prepareMembershipContext, resolveMembershipRules, collectMembershipConflicts, verifyFacts } from "../agents.js";
-import { buildMembershipGraph, route_person_facts_agent } from "../graph.js";
+import { buildMembershipGraph, buildPersonFactsGraph, route_person_facts_agent } from "../graph.js";
 import { fillUnknownDates } from "../rules.js";
 import type { Researcher, ResearchAnswer } from "../research.js";
 
@@ -110,6 +110,18 @@ test("person facts plan retains identity unresolved findings", () => {
   const plan = buildPersonFactsOnlyPlan("b", input, ctx, res, "dry_run", facts, [identityFinding]);
   assert.deepEqual(plan.findings, [identityFinding]);
   assert.equal(plan.summary.unresolved, 1);
+});
+
+test("person facts graph resumes its final state from the configured checkpointer", async () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].birthDate = "2004-12-07";
+  const graph = buildPersonFactsGraph({ checkpointer: new MemorySaver() });
+  const config = { configurable: { thread_id: "person-facts-checkpoint" } };
+  const result = await graph.invoke({ batchId: "b", input, context: ctx, resolution: res, mode: "dry_run" }, config);
+  assert.ok(result.facts.changes.some(c => c.operation.kind === "person_fact" && c.operation.field === "birthDate"));
+  const state = await graph.getState(config);
+  assert.equal(state.values.facts.changes.length, result.facts.changes.length);
+  assert.equal(state.next.length, 0);
 });
 
 test("conflicting existing person facts are unresolved and never overwritten", () => {
