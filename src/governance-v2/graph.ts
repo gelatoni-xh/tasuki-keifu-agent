@@ -260,6 +260,7 @@ export function buildBatchGraph(deps: {
 }
 
 export function buildPersonFactsGraph(deps: {
+  checkpointer?: BaseCheckpointSaver;
   onNode?: (name: string) => Promise<void>;
   failAfter?: string;
 }) {
@@ -279,5 +280,5 @@ export function buildPersonFactsGraph(deps: {
     .addEdge("compare_person_facts", "collect_person_fact_conflicts")
     .addEdge("collect_person_fact_conflicts", "validate_person_fact_decisions")
     .addEdge("validate_person_fact_decisions", END)
-    .compile({ name: "person_facts_graph" });
+    .compile({ name: "person_facts_graph", checkpointer: deps.checkpointer });
 }
