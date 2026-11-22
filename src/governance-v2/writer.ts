@@ -282,18 +282,19 @@ export class BusinessWriter {
       case "person_fact": {
         entityType = "Person";
         entityId = op.personId;
+        const field = op.field === "hometown" ? "hometown" : "registeredPrefecture";
         const p = (
           await c.query(
-            'SELECT hometown FROM public."Person" WHERE id=$1 FOR UPDATE',
+            `SELECT "${field}" FROM public."Person" WHERE id=$1 FOR UPDATE`,
             [entityId],
           )
         ).rows[0];
         if (!p) throw new Error("Missing fact target");
-        if (p.hometown && p.hometown !== op.value)
+        if (p[field] && p[field] !== op.value)
           throw new StalePlanError(`person:${entityId}`);
         before = p;
         await c.query(
-          'UPDATE public."Person" SET hometown=$2,"updatedAt"=clock_timestamp() WHERE id=$1',
+          `UPDATE public."Person" SET "${field}"=$2,"updatedAt"=clock_timestamp() WHERE id=$1`,
           [entityId, op.value],
         );
         break;
@@ -540,6 +541,7 @@ async function merge(
         "displayNameEn",
         "birthDate",
         "hometown",
+        "registeredPrefecture",
         "nationality",
         "heightCm",
         "weightKg",

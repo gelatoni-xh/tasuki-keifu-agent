@@ -58,6 +58,15 @@ test("DNS row still verifies source-backed person facts", () => {
   assert.ok(result.changes.some(c => c.operation.kind === "person_fact" && c.operation.personId === "p"));
 });
 
+test("hometown and registered prefecture are independent facts", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].hometown = "東京";
+  input.rows[0].registeredPrefecture = "長野";
+  const result = verifyFacts("b", input, ctx, res);
+  const facts = result.changes.filter(c => c.operation.kind === "person_fact");
+  assert.deepEqual(facts.map(c => c.operation.kind === "person_fact" && c.operation.field).sort(), ["hometown", "registeredPrefecture"]);
+});
+
 test("local organization finding leaves a known membership relation actionable", async () => {
   const { input, ctx, res } = fixture();
   res.findings = [{ key: "local", code: "organization_variant", subjectRef: "r",

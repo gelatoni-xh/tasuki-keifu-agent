@@ -53,6 +53,7 @@ export const graphNodeNames = [
   "membership_timeline", "collect_membership_conflicts",
   "membership_deep_research", "validate_membership_decisions", "finalize_membership",
   "verify_person_facts",
+  "compare_person_facts", "collect_person_fact_conflicts", "validate_person_fact_decisions",
   "aggregate_governance_result",
 ] as const;
 export function route_membership_agent(
@@ -71,7 +72,7 @@ export function route_membership_agent(
 export function route_person_facts_agent(
   s: BatchGraphState,
 ): "verify_person_facts" | "aggregate_governance_result" {
-  return s.input.rows.some((r) => r.hometown || r.pbs.length)
+  return s.input.rows.some((r) => r.hometown || r.registeredPrefecture || r.pbs.length)
     ? "verify_person_facts"
     : "aggregate_governance_result";
 }
@@ -142,16 +143,9 @@ export function buildBatchGraph(deps: {
       return value;
     };
   const membershipGraph = buildMembershipGraph({ ...deps, checkpointer: undefined });
-  const factsGraph = new StateGraph(State)
-    .addNode(
-      "compare_person_facts",
-      node("compare_person_facts", (s) => ({
-        facts: verifyFacts(s.batchId, s.input, s.context, s.resolution),
-      })),
-    )
-    .addEdge(START, "compare_person_facts")
-    .addEdge("compare_person_facts", END)
-    .compile({ name: "person_facts_graph" });
+  const factsGraph = buildPersonFactsGraph(deps);
+  // 个人事实图保持轻量：规则先筛选 PB/事实候选，冲突研究节点后续只接收
+  // 明确的事实冲突，不复制归一化图的多层实体研究。
   const skipped = (agentKey: string): AgentResult => ({
     agentKey,
     skipped: true,
@@ -263,4 +257,27 @@ export function buildBatchGraph(deps: {
       name: "governance_batch_graph",
       checkpointer: deps.checkpointer,
     });
+}
+
+export function buildPersonFactsGraph(deps: {
+  onNode?: (name: string) => Promise<void>;
+  failAfter?: string;
+}) {
+  const node = <T>(name: string, fn: (state: BatchGraphState) => T | Promise<T>) => async (state: BatchGraphState) => {
+    await deps.onNode?.(name);
+    const value = await fn(state);
+    if (deps.failAfter === name) throw new Error(`Injected interruption at ${name}`);
+    return value;
+  };
+  return new StateGraph(State)
+    .addNode("compare_person_facts", node("compare_person_facts", s => ({
+      facts: verifyFacts(s.batchId, s.input, s.context, s.resolution),
+    })))
+    .addNode("collect_person_fact_conflicts", node("collect_person_fact_conflicts", s => ({ facts: s.facts })))
+    .addNode("validate_person_fact_decisions", node("validate_person_fact_decisions", s => ({ facts: s.facts })))
+    .addEdge(START, "compare_person_facts")
+    .addEdge("compare_person_facts", "collect_person_fact_conflicts")
+    .addEdge("collect_person_fact_conflicts", "validate_person_fact_decisions")
+    .addEdge("validate_person_fact_decisions", END)
+    .compile({ name: "person_facts_graph" });
 }

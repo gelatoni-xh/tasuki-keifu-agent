@@ -38,7 +38,7 @@ export type Task = {
   id: string;
   mode: Manifest["mode"];
   status: string;
-  inputManifest: { version: string; eventEditionId: string; agentMode?: "full" | "membership_only" };
+  inputManifest: { version: string; eventEditionId: string; agentMode?: "full" | "membership_only" | "person_facts_only" };
   leaseToken: string;
   manifestHash: string;
 };

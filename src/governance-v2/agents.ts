@@ -1172,27 +1172,31 @@ export function verifyFacts(
   for (const row of input.rows) {
     if (res.findings.some(f => f.subjectRef === row.key && f.status === "unresolved")) continue;
     const personId = res.personMap[row.key];
-    if (row.hometown) {
+    for (const [field, value] of ([
+      ["hometown", row.hometown],
+      ["registeredPrefecture", row.registeredPrefecture],
+    ] as const)) {
+      if (!value || !personId) continue;
       out.metrics.ruleDecisions++;
       const old =
-        ctx.people.find((p) => p.id === personId)?.hometown ??
+        ctx.people.find((p) => p.id === personId)?.[field] ??
         ctx.people.find(
           (p) =>
-            canonicalEntity(res, p.id, "person") === personId && p.hometown,
-        )?.hometown;
+            canonicalEntity(res, p.id, "person") === personId && p[field],
+        )?.[field];
       if (!old && ctx.source.reliability >= 3)
         out.changes.push(
           change(
             batchId,
-            `hometown:${personId}`,
+            `${field}:${personId}`,
             {
               kind: "person_fact",
               personId,
-              field: "hometown",
-              value: row.hometown,
+              field,
+              value,
             },
             "person_facts",
-            "可靠来源补空出身地",
+            field === "hometown" ? "可靠来源补空出身地" : "可靠来源补空登录陆协",
             versions(ctx, [personId]),
           ),
         );
@@ -1411,6 +1415,31 @@ export async function buildMembershipOnlyPlan(
       plannedRepairs: changes.length,
       unresolved: membership.findings.filter(f => f.status === "unresolved").length,
       metrics: [ { agentKey: "membership", ...membership.metrics } ],
+    },
+  };
+}
+
+export function buildPersonFactsOnlyPlan(
+  batchId: string,
+  input: BatchInput,
+  ctx: Context,
+  res: Resolution,
+  mode: Manifest["mode"],
+  result: AgentResult,
+): Plan {
+  const skipped = (agentKey: string): AgentResult => ({
+    agentKey, skipped: true, findings: [], changes: [], metrics: emptyMetrics(),
+  });
+  return {
+    batchId, raceId: ctx.raceId, sourceId: input.sourceId, editionId: ctx.editionId,
+    mode, changes: result.changes, findings: result.findings,
+    agents: [skipped("normalization"), skipped("membership"), result],
+    summary: {
+      mode, agentMode: "person_facts_only", importedRows: 0, plannedRows: 0,
+      changes: result.changes.length, repairs: mode === "apply" ? result.changes.length : 0,
+      plannedRepairs: result.changes.length,
+      unresolved: result.findings.filter(f => f.status === "unresolved").length,
+      metrics: [{ agentKey: "person_facts", ...result.metrics }],
     },
   };
 }
