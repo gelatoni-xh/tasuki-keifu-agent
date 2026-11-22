@@ -225,15 +225,25 @@ export class EventRunner {
           const personMap = Object.fromEntries(input.rows.map(row => {
             const sourceKey = row.sourceKey ?? `${input.raceSlug}:${row.key}`;
             const mapped = context.sourceMappings.find(m => m.entityType === "person" && m.sourceKey === sourceKey)?.personId;
-            return [row.key, mapped];
+            const matches = context.people.filter(p => normalizeName(p.displayNameJa) === normalizeName(row.name));
+            return [row.key, mapped ?? (matches.length === 1 ? matches[0].id : undefined)];
           }).filter(([, id]) => !!id) as Array<[string, string]>);
-          const missing = input.rows.filter(row => !personMap[row.key]);
-          if (missing.length) throw new Error(`person_facts_only requires existing source mappings: ${missing.map(r => r.key).join(", ")}`);
+          const identityFindings = input.rows.filter(row => !personMap[row.key]).map(row => ({
+            key: `person_facts_identity:${row.key}`,
+            code: "identity_unresolved",
+            subjectRef: row.key,
+            severity: "serious" as const,
+            status: "unresolved" as const,
+            reason: context.people.some(p => normalizeName(p.displayNameJa) === normalizeName(row.name))
+              ? `姓名“${row.name}”对应多个既有选手，缺少稳定来源映射，个人事实暂不写入。`
+              : `姓名“${row.name}”没有稳定来源映射或唯一规范姓名匹配，个人事实暂不写入。`,
+            evidence: [{ sourceId: input.sourceId, sourceKey: row.sourceKey ?? `${input.raceSlug}:${row.key}`, url: row.sourceUrl }],
+          }));
           const resolution: Resolution = { organizationMap: {}, personMap, findings: [], changes: [], metrics: emptyMetrics() };
           const result = await graph.invoke(snapshot.values?.facts ? null : {
             batchId: batch.id, input, context, resolution, mode: task.mode,
           }, config);
-          plan = buildPersonFactsOnlyPlan(batch.id, input, context, resolution, task.mode, result.facts);
+          plan = buildPersonFactsOnlyPlan(batch.id, input, context, resolution, task.mode, result.facts, identityFindings);
         } else {
           const result = await graph.invoke(
             snapshot.values?.batchId ? null : { batchId: batch.id, input, mode: task.mode },

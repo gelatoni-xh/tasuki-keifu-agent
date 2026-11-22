@@ -270,7 +270,7 @@ export type Operation =
     }
   | { kind: "membership"; membership: Membership }
   | { kind: "delete_membership"; membershipId: string; personId: string; organizationId: string; retainedId: string }
-  | { kind: "person_fact"; personId: string; field: "hometown" | "registeredPrefecture"; value: string }
+  | { kind: "person_fact"; personId: string; field: "birthDate" | "hometown" | "registeredPrefecture"; value: string }
   | {
       kind: "personal_best";
       personId: string;

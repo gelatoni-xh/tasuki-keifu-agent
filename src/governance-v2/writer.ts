@@ -282,7 +282,7 @@ export class BusinessWriter {
       case "person_fact": {
         entityType = "Person";
         entityId = op.personId;
-        const field = op.field === "hometown" ? "hometown" : "registeredPrefecture";
+        const field = op.field;
         const p = (
           await c.query(
             `SELECT "${field}" FROM public."Person" WHERE id=$1 FOR UPDATE`,
