@@ -18,6 +18,7 @@ import {
   isDnsRow,
   academicWindow,
   adjacentSchoolWindow,
+  reconcileAcademicDateBasis,
   fillUnknownDates,
   fingerprint,
   markMillis,
@@ -930,8 +931,11 @@ export function resolveMembershipRules(batchId: string, input: BatchInput, ctx: 
 }
 export function inferMembershipTimeline(state: MembershipWork, ctx: Context): MembershipWork {
   const work = structuredClone(state), out = work.result;
-  const all = new Map(work.memberships.map(m => [m.id, m]));
   const affected = new Set(work.affectedPersonIds);
+  // Revalidate every affected academic anchor before inferring adjacent stages,
+  // independent of stored row order. Unsubstantiated legacy dates stay unknown.
+  const all = new Map(work.memberships.map(m =>
+    [m.id, affected.has(m.personId) ? reconcileAcademicDateBasis(m) : m]));
   // A historical starter is an observation of a relationship, not proof of its joining date.
   for (const result of ctx.historicalResults ?? []) {
     if (!affected.has(result.personId) || !result.isStarter || !result.raceDate || !result.organizationId) continue;

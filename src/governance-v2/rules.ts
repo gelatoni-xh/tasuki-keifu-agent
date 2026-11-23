@@ -86,6 +86,28 @@ export function inferredWindow(
     evidence,
   };
 }
+// Legacy rows can retain a grade-derived window while their basis is still
+// "unknown". Recheck the original evidence before using them as school anchors;
+// a date alone, or a chain of adjacent-school estimates, is not enough.
+export function reconcileAcademicDateBasis(m: Membership): Membership {
+  if (m.evidence?.rule !== "grade_to_academic_window") return m;
+  const { grade, raceDate, kind } = m.evidence;
+  if (typeof grade !== "number" || typeof raceDate !== "string" ||
+      (kind !== undefined && kind !== m.organizationType)) return m;
+  const expected = academicWindow(m.organizationType, grade, raceDate);
+  if (!expected) return m;
+  const next = { ...m };
+  for (const side of ["start", "end"] as const) {
+    const dateKey = `${side}Date` as const, yearKey = `${side}Year` as const;
+    const basisKey = `${side}Basis` as const;
+    const expectedDate = expected[dateKey];
+    if (m[basisKey] === "unknown" && m[dateKey] === expectedDate && expectedDate &&
+        (m[yearKey] === undefined || m[yearKey] === Number(expectedDate.slice(0, 4)))) {
+      next[basisKey] = "inferred";
+    }
+  }
+  return next;
+}
 export function adjacentSchoolWindow(
   kind: string,
   memberships: Membership[],

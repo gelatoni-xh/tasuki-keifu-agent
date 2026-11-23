@@ -50,6 +50,35 @@ test("race observation does not invent a corporate joining date or ongoing emplo
   assert.equal((await governMemberships("b", input, ctx, res, noResearch)).findings.length, 0);
 });
 
+test("alumni dates use corroborated legacy grade evidence and retain inferred provenance", async () => {
+  const { input, ctx, res } = fixture();
+  input.organizations = [{ key: "h", name: "高校", type: "high_school" }];
+  input.rows[0].organizationKey = undefined;
+  input.rows[0].memberships = [{ organizationKey: "h", type: "origin", endState: "unknown" }];
+  res.organizationMap = { h: "h" };
+  ctx.organizations = [{ id: "h", slug: "h", nameJa: "高校", type: "high_school" },
+    { id: "u", slug: "u", nameJa: "大学", type: "university" }];
+  ctx.memberships = [mem({ id: "u", organizationId: "u", organizationType: "university", type: "enrolled",
+    startDate: "2023-04-01", endDate: "2027-03-31",
+    evidence: { rule: "grade_to_academic_window", kind: "university", grade: 2, raceDate: "2024-10-19" } })];
+  const result = await governMemberships("b", input, ctx, res, noResearch);
+  const school = result.changes.find(c => c.operation.kind === "membership" && c.operation.membership.organizationId === "h");
+  assert.equal(school?.operation.kind, "membership");
+  if (school?.operation.kind !== "membership") return;
+  assert.equal(school.operation.membership.startDate, "2020-04-01");
+  assert.equal(school.operation.membership.endDate, "2023-03-31");
+  assert.equal(school.operation.membership.startBasis, "inferred");
+  assert.equal(school.operation.membership.endBasis, "inferred");
+  assert.equal(school.operation.membership.evidence?.rule, "university_start_to_high_school");
+  // Dates without corroboration, or inconsistent with the grade, cannot anchor inference.
+  for (const evidence of [{}, { rule: "grade_to_academic_window", grade: 1, raceDate: "2024-10-19" }]) {
+    ctx.memberships[0].evidence = evidence;
+    const held = await governMemberships("b", input, ctx, res, noResearch);
+    const high = held.changes.find(c => c.operation.kind === "membership" && c.operation.membership.organizationId === "h");
+    assert.equal(high?.operation.kind === "membership" && high.operation.membership.startDate, undefined);
+  }
+});
+
 test("DNS row still verifies source-backed person facts", () => {
   const { input, ctx, res } = fixture();
   input.rows[0].notes = "DNS";
