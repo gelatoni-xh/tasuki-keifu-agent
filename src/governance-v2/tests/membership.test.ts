@@ -172,6 +172,18 @@ test("unreliable or incomparable PB candidates are unresolved; slower marks are 
   assert.equal(slowerMark.changes.length, 0);
 });
 
+test("unresolved identities do not create PB changes without a personId", () => {
+  const { input, ctx, res } = fixture();
+  input.rows[0].pbs = [{ discipline: "m10000", mark: "27:00", sourceId: "s" }];
+  res.personMap = {};
+  ctx.sources = [{ id: "s", reliability: 5 }];
+
+  const result = verifyFacts("b", input, ctx, res);
+
+  assert.equal(result.changes.length, 0);
+  assert.equal(result.findings.length, 0);
+});
+
 test("local organization finding leaves a known membership relation actionable", async () => {
   const { input, ctx, res } = fixture();
   res.findings = [{ key: "local", code: "organization_variant", subjectRef: "r",
