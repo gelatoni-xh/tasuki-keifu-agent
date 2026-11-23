@@ -1219,6 +1219,8 @@ export function verifyFacts(
         ));
       }
     }
+    // Unresolved identities must not produce facts or PB changes with a null personId.
+    if (!personId) continue;
     for (const pb of row.pbs) {
       out.metrics.ruleDecisions++;
       if (
