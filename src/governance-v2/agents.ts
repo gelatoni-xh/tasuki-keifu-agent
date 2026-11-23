@@ -1,3 +1,4 @@
+import { canonicalAssociation, decideAssociation } from "./registration.js";
 // 修改履历或个人事实的规则、冲突分组与裁决门槛时，主动提醒用户评估观测页三语节点说明。
 // 未形成待发布版本时可暂缓更新图例，发布前须按实际规则 diff 再核对。
 import {
@@ -1179,7 +1180,6 @@ export function verifyFacts(
     for (const [field, value] of ([
       ["birthDate", row.birthDate],
       ["hometown", row.hometown],
-      ["registeredPrefecture", row.registeredPrefecture],
     ] as const)) {
       if (!value || !personId) continue;
       out.metrics.ruleDecisions++;
@@ -1190,7 +1190,7 @@ export function verifyFacts(
             canonicalEntity(res, p.id, "person") === personId && p[field],
         )?.[field];
       if (old && normalizeName(old) !== normalizeName(value)) {
-        const label = field === "birthDate" ? "出生日期" : field === "hometown" ? "出身地" : "登录陆协";
+        const label = field === "birthDate" ? "出生日期" : "出身地";
         out.findings.push(unresolved(
           `person_fact_conflict:${field}:${personId}:${row.key}`,
           row.key,
@@ -1209,18 +1209,41 @@ export function verifyFacts(
               value,
             },
             "person_facts",
-            field === "birthDate" ? "可靠来源补空出生日期" : field === "hometown" ? "可靠来源补空出身地" : "可靠来源补空登录陆协",
+            field === "birthDate" ? "可靠来源补空出生日期" : "可靠来源补空出身地",
             versions(ctx, [personId]),
           ),
         );
       } else if (!old) {
-        const label = field === "birthDate" ? "出生日期" : field === "hometown" ? "出身地" : "登录陆协";
+        const label = field === "birthDate" ? "出生日期" : "出身地";
         out.findings.push(unresolved(
           `person_fact_evidence:${field}:${personId}:${row.key}`,
           row.key,
           `来源可靠度为 ${ctx.source.reliability}，不足以补入${label}“${value}”。`,
           "insufficient_evidence",
         ));
+      }
+    }
+    if (personId && row.registeredPrefecture) {
+      out.metrics.ruleDecisions++;
+      const value = canonicalAssociation(row.registeredPrefecture);
+      const rows = input.rows.filter(r => res.personMap[r.key] === personId && r.registeredPrefecture &&
+        !res.findings.some(f => f.subjectRef === r.key && f.status === "unresolved"));
+      const conflictingRows = new Set(rows.map(r => canonicalAssociation(r.registeredPrefecture!) ?? r.registeredPrefecture)).size > 1;
+      const people = ctx.people.filter(p => canonicalEntity(res, p.id, "person") === personId);
+      const person = people.find(p => p.id === personId) ?? people[0];
+      const evidence = people.flatMap(p => p.registeredAssociationEvidence ?? []);
+      const asOf = ctx.associationSourceDate ?? ctx.raceDate;
+      const decision = conflictingRows
+        ? { action: "unresolved", reason: "同一批次的同人存在不同登录陆协。" }
+        : decideAssociation(person?.registeredPrefecture, value ?? row.registeredPrefecture, asOf, evidence, ctx.source.reliability);
+      if (decision.action === "unresolved") {
+        out.findings.push(unresolved(`person_fact_conflict:registeredPrefecture:${personId}:${row.key}`, row.key,
+          decision.reason, ctx.source.reliability < 3 ? "insufficient_evidence" : "person_fact_conflict"));
+      } else if (decision.action === "write" && value && asOf &&
+        !out.changes.some(c => c.operation.kind === "person_fact" && c.operation.field === "registeredPrefecture" && c.operation.personId === personId)) {
+        out.changes.push(change(batchId, `registeredPrefecture:${personId}`, {
+          kind: "person_fact", personId, field: "registeredPrefecture", value, asOf,
+        }, "person_facts", decision.reason, versions(ctx, people.map(p => p.id))));
       }
     }
     // Unresolved identities must not produce facts or PB changes with a null personId.

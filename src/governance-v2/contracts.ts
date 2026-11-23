@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const CONTRACT_VERSION = "event-governance/1";
-export const RULE_VERSION = "2026-11-20.1";
+export const RULE_VERSION = "2026-11-24.1";
 // CONTRACT_VERSION 描述数据形状；RULE_VERSION 描述治理判断规则，二者变更含义不同。
 const text = z.string().trim().min(1);
 export const orgTypes = [
@@ -200,6 +200,7 @@ export type Person = {
   birthDate?: string | null;
   hometown?: string | null;
   registeredPrefecture?: string | null;
+  registeredAssociationEvidence?: import("./registration.js").AssociationEvidence[];
   updatedAt?: string;
   aliases?: string[];
 };
@@ -229,6 +230,7 @@ export type Source = { id: string; reliability: number };
 export type Context = {
   raceId: string;
   raceDate?: string;
+  associationSourceDate?: string;
   editionId: string;
   source: Source;
   sources: Source[];
@@ -270,7 +272,8 @@ export type Operation =
     }
   | { kind: "membership"; membership: Membership }
   | { kind: "delete_membership"; membershipId: string; personId: string; organizationId: string; retainedId: string }
-  | { kind: "person_fact"; personId: string; field: "birthDate" | "hometown" | "registeredPrefecture"; value: string }
+  | { kind: "person_fact"; personId: string; field: "birthDate" | "hometown"; value: string }
+  | { kind: "person_fact"; personId: string; field: "registeredPrefecture"; value: string; asOf: string }
   | {
       kind: "personal_best";
       personId: string;
