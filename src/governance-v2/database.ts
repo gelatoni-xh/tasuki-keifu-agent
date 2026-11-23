@@ -1,3 +1,4 @@
+import { japanRaceDate } from "./registration.js";
 import { randomUUID } from "node:crypto";
 import { Pool, types, type PoolClient } from "pg";
 import { basis, fingerprint, normalizeName } from "./rules.js";
@@ -362,6 +363,14 @@ export class GovernanceDB {
         updatedAt: iso(p.updatedAt),
         birthDate: date(p.birthDate),
       }));
+      // Only explicitly recorded association evidence can date the existing value.
+      // A profile update, source access time, or unrelated race result is not evidence.
+      const associationRefs = (await c.query(`SELECT "personId","sourceId",metadata->'registeredAssociation' AS evidence
+        FROM public."SourceReference" WHERE "personId"=ANY($1::text[]) AND metadata ? 'registeredAssociation'`,
+        [people.map(p => p.id)])).rows;
+      for (const person of people) person.registeredAssociationEvidence = associationRefs
+        .filter(r => r.personId === person.id && typeof r.evidence?.value === "string" && typeof r.evidence?.asOf === "string")
+        .map(r => ({ value: r.evidence.value, asOf: r.evidence.asOf, sourceId: r.sourceId }));
       const membershipsRows = (
         await c.query(
           'SELECT m.*,o.type AS "organizationType" FROM public."Membership" m JOIN public."Organization" o ON o.id=m."organizationId" WHERE m."personId"=ANY($1::text[])',
@@ -435,6 +444,7 @@ export class GovernanceDB {
       return {
         raceId: race.id,
         raceDate: date(race.startsAt),
+        associationSourceDate: japanRaceDate(race.startsAt),
         editionId: race.competitionEditionId,
         source,
         sources,

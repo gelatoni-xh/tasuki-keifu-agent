@@ -505,7 +505,12 @@ test("evidence-backed person merge moves associations and compares PB across bot
   await pool.query(`INSERT INTO public."Person" (id,slug,"displayNameJa",hometown,"updatedAt") VALUES('p2','second-athlete','試験太郎','東京都',now());
     INSERT INTO public."Membership" (id,"personId","organizationId",type,"updatedAt") VALUES('mu1','p','u','enrolled',now()),('mu2','p2','u','enrolled',now());
     INSERT INTO public."PersonalBest" (id,"personId",discipline,mark,"markMillis","sourceId","updatedAt") VALUES('pb2','p2','m10000','27:00',1620000,'s',now());
-    DELETE FROM public."SourceReference";`);
+    DELETE FROM public."SourceReference";
+    UPDATE public."Person" SET "registeredPrefecture"='東京' WHERE id='p';
+    UPDATE public."Person" SET "registeredPrefecture"='大阪' WHERE id='p2';
+    INSERT INTO public."SourceReference"(id,"sourceId","sourceEntityType","sourceEntityKey","personId",metadata,"updatedAt") VALUES
+      ('assoc-a','s','person_fact','association-a','p','{"registeredAssociation":{"value":"東京","asOf":"2023-10-14"}}',now()),
+      ('assoc-b','s','person_fact','association-b','p2','{"registeredAssociation":{"value":"大阪","asOf":"2025-10-18"}}',now());`);
   const input = manifest("merge");
   input.batches = input.batches.slice(0, 1);
   const id = await db.submit(input, store);
@@ -537,6 +542,8 @@ test("evidence-backed person merge moves associations and compares PB across bot
     ).rows[0].n,
     0,
   );
+  assert.equal((await pool.query('SELECT "registeredPrefecture" FROM public."Person" WHERE id=\'p\'')).rows[0].registeredPrefecture, "大阪");
+  assert.equal((await pool.query('SELECT "personId" FROM public."SourceReference" WHERE id=\'assoc-b\'')).rows[0].personId, "p");
   assert.equal(
     (await pool.query("SELECT hometown FROM public.\"Person\" WHERE id='p'"))
       .rows[0].hometown,
@@ -787,4 +794,58 @@ test("deduplication retains every source footprint across multiple duplicate mem
   assert.equal(audit.length, 2);
   const kept = JSON.stringify(rows[0].dateEvidence);
   assert.ok(kept.includes("first duplicate")); assert.ok(kept.includes("second duplicate"));
+});
+
+test("person-facts-only persists dated association evidence and handles reverse chronological imports", async () => {
+  await pool.query(`UPDATE public."Person" SET "registeredPrefecture"='東京' WHERE id='p';
+    INSERT INTO public."SourceReference"(id,"sourceId","sourceEntityType","sourceEntityKey","personId",metadata,"updatedAt")
+    VALUES('association-proof','s','person_fact','registered-association:p:2025-10-18','p',
+      '{"registeredAssociation":{"value":"東京","asOf":"2025-10-18"}}',now())`);
+  const run = async (key: string, date: string | null, value: string, unresolved = false) => {
+    await pool.query('UPDATE public."Race" SET "startsAt"=$1 WHERE id=\'r1\'', [date]);
+    const input = manifestSchema.parse(manifest(key));
+    input.agentMode = "person_facts_only";
+    input.batches = input.batches.slice(0, 1);
+    input.batches[0].organizations = [];
+    input.batches[0].rows = [{ key: "a", sourceKey: "athlete-1", name: "試験太郎", registeredPrefecture: value, memberships: [], pbs: [] }];
+    const id = await db.submit(input, store);
+    const report = await new EventRunner(db, store, saver, { writeEnabled: true, researcher: async () => assert.fail("Association rule called LLM") }).run(id);
+    assert.equal(report?.status, unresolved ? "completed_with_unresolved" : "completed");
+    return (await pool.query('SELECT "registeredPrefecture" AS value FROM public."Person" WHERE id=\'p\'')).rows[0].value;
+  };
+  assert.equal(await run("association-older", "2024-10-19", "大阪府"), "東京");
+  assert.equal(await run("association-newer", "2026-10-16T23:30:00", "大阪府"), "大阪");
+  let refs = (await pool.query(`SELECT metadata FROM public."SourceReference" WHERE "personId"='p' AND metadata ? 'registeredAssociation'`)).rows;
+  assert.ok(refs.some(r => r.metadata.registeredAssociation.asOf === "2026-10-17" && r.metadata.registeredAssociation.value === "大阪"));
+  assert.equal(await run("association-same-value-newer", "2027-10-17", "大阪府"), "大阪");
+  assert.equal(await run("association-backwards", "2026-12-01", "長野県"), "大阪");
+  assert.equal(await run("association-same-day-conflict", "2027-10-17", "長野県", true), "大阪");
+  assert.equal(await run("association-missing-date", null, "長野県", true), "大阪");
+  assert.equal((await pool.query('SELECT count(*) FROM public."RaceResult"')).rows[0].count, "0");
+});
+
+test("association writer rejects an outdated plan even when profile version was not changed", async () => {
+  await pool.query(`UPDATE public."Person" SET "registeredPrefecture"='東京' WHERE id='p';
+    INSERT INTO public."SourceReference"(id,"sourceId","sourceEntityType","sourceEntityKey","personId",metadata,"updatedAt")
+    VALUES('assoc-original','s','person_fact','original','p','{"registeredAssociation":{"value":"東京","asOf":"2023-10-14"}}',now())`);
+  const input = manifestSchema.parse(manifest("association-stale-plan"));
+  input.agentMode = "person_facts_only";
+  input.batches = input.batches.slice(0, 1);
+  input.batches[0].organizations = [];
+  input.batches[0].rows = [{ key: "a", sourceKey: "athlete-1", name: "試験太郎", registeredPrefecture: "大阪府", memberships: [], pbs: [] }];
+  const id = await db.submit(input, store);
+  let injected = false;
+  const report = await new EventRunner(db, store, saver, { writeEnabled: true, researcher: noResearch,
+    beforeApply: async () => {
+      if (injected) return;
+      injected = true;
+      // Simulate another source advancing evidence after plan construction.
+      // Leave updatedAt alone to exercise the writer date guard, not only the version guard.
+      await pool.query(`INSERT INTO public."SourceReference"(id,"sourceId","sourceEntityType","sourceEntityKey","personId",metadata,"updatedAt")
+        VALUES('assoc-concurrent','s','person_fact','concurrent','p','{"registeredAssociation":{"value":"東京","asOf":"2025-10-18"}}',now())`);
+    },
+  }).run(id);
+  assert.equal(report?.status, "completed");
+  assert.equal((await pool.query('SELECT "registeredPrefecture" FROM public."Person" WHERE id=\'p\'')).rows[0].registeredPrefecture, "東京");
+  assert.equal((await pool.query('SELECT count(*) FROM governance."BatchAttempt" WHERE status=\'superseded\'')).rows[0].count, "1");
 });

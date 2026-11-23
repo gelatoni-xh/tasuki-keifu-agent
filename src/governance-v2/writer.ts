@@ -1,3 +1,4 @@
+import { associationAsOf, canonicalAssociation, decideAssociation } from "./registration.js";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { RULE_VERSION, type Change, type Operation, type Plan } from "./contracts.js";
@@ -290,8 +291,26 @@ export class BusinessWriter {
           )
         ).rows[0];
         if (!p) throw new Error("Missing fact target");
-        if (p[field] && p[field] !== op.value)
+        if (op.field === "registeredPrefecture") {
+          // Recheck in the same transaction under the Person lock, including resumed/old plans.
+          const refs = await c.query(`SELECT metadata->'registeredAssociation' AS evidence FROM public."SourceReference"
+            WHERE "personId"=$1 AND metadata ? 'registeredAssociation'`, [entityId]);
+          const source = (await c.query('SELECT reliability FROM public."Source" WHERE id=$1', [plan.sourceId])).rows[0];
+          const decision = decideAssociation(p[field], op.value, op.asOf,
+            refs.rows.map(r => r.evidence).filter(e => typeof e?.value === "string" && typeof e?.asOf === "string"), source?.reliability ?? 0);
+          if (canonicalAssociation(op.value) !== op.value || decision.action !== "write")
+            throw new StalePlanError(`person:${entityId}`);
+          const key = `registered-association:${entityId}:${op.asOf}`;
+          await c.query(`INSERT INTO public."SourceReference"
+            (id,"sourceId","sourceEntityType","sourceEntityKey","personId",metadata,"updatedAt")
+            VALUES($1,$2,'person_fact',$3,$4,$5,clock_timestamp())
+            ON CONFLICT("sourceId","sourceEntityType","sourceEntityKey") DO UPDATE
+            SET metadata=EXCLUDED.metadata,"updatedAt"=clock_timestamp()`,
+            [stableId(plan.sourceId, "person_fact", key), plan.sourceId, key, entityId,
+              { registeredAssociation: { value: op.value, asOf: op.asOf, dateBasis: "race_date_jst" } }]);
+        } else if (p[field] && (field === "birthDate" ? iso(p[field])?.slice(0, 10) : p[field]) !== op.value) {
           throw new StalePlanError(`person:${entityId}`);
+        }
         before = p;
         await c.query(
           `UPDATE public."Person" SET "${field}"=$2,"updatedAt"=clock_timestamp() WHERE id=$1`,
@@ -507,6 +526,20 @@ async function merge(
     ).rowCount;
     if (collisions)
       throw new Error("Organization merge has team result collision");
+  }
+  if (person) {
+    const canonical = entities.find(e => e.id === op.canonicalId)!;
+    const a = canonical.registeredPrefecture, b = duplicate.registeredPrefecture;
+    if (a && b && canonicalAssociation(a) !== canonicalAssociation(b)) {
+      const refs = (await c.query(`SELECT "personId",metadata->'registeredAssociation' AS evidence
+        FROM public."SourceReference" WHERE "personId"=ANY($1::text[]) AND metadata ? 'registeredAssociation'`,
+        [[op.canonicalId, op.duplicateId]])).rows;
+      const evidence = (id: string) => refs.filter(r => r.personId === id)
+        .map(r => r.evidence).filter(e => typeof e?.value === "string" && typeof e?.asOf === "string");
+      const ad = associationAsOf(a, evidence(op.canonicalId)), bd = associationAsOf(b, evidence(op.duplicateId));
+      if (!ad || !bd || ad === bd) throw new Error("Merge has conflicting undated or same-date registered associations");
+      if (bd > ad) await c.query('UPDATE public."Person" SET "registeredPrefecture"=$2 WHERE id=$1', [op.canonicalId, canonicalAssociation(b)]);
+    }
   }
   const move = person
     ? [
